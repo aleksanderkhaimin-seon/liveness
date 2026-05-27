@@ -1,0 +1,35 @@
+{
+  "name": "Liveness TensorFlow",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "liveness-training",
+  "workspaceFolder": "/mnt/userefs/aleksandr_khaimin/Work/liveness",
+  "shutdownAction": "stopCompose",
+  "forwardPorts": [
+    8888,
+    6006
+  ],
+  "portsAttributes": {
+    "8888": {
+      "label": "Jupyter Lab",
+      "onAutoForward": "notify"
+    },
+    "6006": {
+      "label": "TensorBoard",
+      "onAutoForward": "notify"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "jupyter.jupyterServerType": "local"
+      }
+    }
+  }
+}

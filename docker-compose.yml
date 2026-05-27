@@ -1,0 +1,24 @@
+services:
+  liveness-training:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+      args:
+        TENSORFLOW_IMAGE: tensorflow/tensorflow:2.21.0-gpu-jupyter
+    container_name: liveness-training
+    runtime: nvidia
+    working_dir: /mnt/userefs/aleksandr_khaimin/Work/liveness
+    volumes:
+      - .:/mnt/userefs/aleksandr_khaimin/Work/liveness
+      - /mnt/dataefs/data/datalake:/mnt/dataefs/data/datalake
+    gpus: "all"
+    ports:
+      - "8888:8888"
+      - "6006:6006"
+    tty: true
+    stdin_open: true
+    shm_size: "12gb"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"

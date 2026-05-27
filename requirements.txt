@@ -1,0 +1,6 @@
+albumentations
+numpy<2
+onnx==1.21.0
+onnxruntime
+Pillow
+tf2onnx==1.17.0

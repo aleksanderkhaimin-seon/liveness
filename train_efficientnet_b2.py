@@ -5,6 +5,7 @@ import json
 import math
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import albumentations as A
@@ -168,6 +169,23 @@ def read_csv_dataset(
 
     if not image_paths:
         raise ValueError(f"No rows found in {csv_path}")
+
+    # A one-class CSV trains to a constant and makes AUC/EER undefined; fail
+    # now rather than after several epochs of val_auc=0.5.
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    print(f"{csv_path}: {len(labels)} rows, label 0: {negatives}, label 1: {positives}")
+    if positives == 0 or negatives == 0:
+        raise ValueError(
+            f"{csv_path} contains only label {1 if positives else 0}; "
+            "a binary classifier cannot be trained or evaluated on it"
+        )
+    minority = min(positives, negatives) / len(labels)
+    if minority < 0.05:
+        print(
+            f"WARNING: {csv_path} minority class is {minority:.1%} of rows",
+            file=sys.stderr,
+        )
 
     return image_paths, labels, bboxes
 

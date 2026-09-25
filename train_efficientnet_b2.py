@@ -268,6 +268,135 @@ def crop_by_bbox(image: tf.Tensor, bbox: tf.Tensor, margin: float) -> tf.Tensor:
     return tf.cond(has_bbox, crop, lambda: image)
 
 
+# -- anonymisation degradations ---------------------------------------------
+#
+# Applied to the decoded full frame, in original pixel coordinates, before any
+# bbox crop and before the resize to IMAGE_SIZE. They run on every split and
+# both classes identically, so they cannot become a label shortcut. Set once
+# from --degrade in main(); module-level like AUGMENTER.
+#
+#   mask:BAND        fill the document interior with its own per-channel mean,
+#                    leaving a border band of BAND x bbox size (0 = whole bbox)
+#   pixelate:N       downsample the document interior so its short side is N px,
+#                    then bilinear-upsample back (text ~4% of N, face ~35% of N)
+#   downscale:N      downsample the whole frame to long side N px and back
+#
+# Example: --degrade mask:0.05,downscale:192
+
+DEGRADE_KINDS = ("mask", "pixelate", "downscale")
+DEGRADATIONS: list[tuple[str, float]] = []
+
+
+def parse_degrade(text: str) -> list[tuple[str, float]]:
+    specs: list[tuple[str, float]] = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        kind, _, value = item.partition(":")
+        kind = kind.strip().lower()
+        if kind not in DEGRADE_KINDS:
+            raise ValueError(f"Unknown degradation {kind!r}; expected one of {DEGRADE_KINDS}")
+        try:
+            number = float(value)
+        except ValueError as error:
+            raise ValueError(f"Degradation {item!r} needs a numeric value, e.g. mask:0.05") from error
+        if kind == "mask" and not 0.0 <= number < 0.5:
+            raise ValueError(f"mask band must be in [0, 0.5), got {number}")
+        if kind in ("pixelate", "downscale") and number < 8:
+            raise ValueError(f"{kind} target must be at least 8 px, got {number}")
+        specs.append((kind, number))
+    return specs
+
+
+def bbox_rect(image: tf.Tensor, bbox: tf.Tensor, shrink: float) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Integer [x1, y1, x2, y2] of the bbox shrunk by `shrink` x its size per side, clipped to the image."""
+    values = tf.ensure_shape(parse_bbox(bbox), [4])
+    x1, y1, x2, y2 = tf.unstack(values, num=4)
+    box_width = x2 - x1
+    box_height = y2 - y1
+    x1 = x1 + box_width * shrink
+    x2 = x2 - box_width * shrink
+    y1 = y1 + box_height * shrink
+    y2 = y2 - box_height * shrink
+    shape = tf.shape(image)
+    height = tf.cast(shape[0], tf.float32)
+    width = tf.cast(shape[1], tf.float32)
+    x1 = tf.cast(tf.floor(tf.clip_by_value(x1, 0.0, width)), tf.int32)
+    y1 = tf.cast(tf.floor(tf.clip_by_value(y1, 0.0, height)), tf.int32)
+    x2 = tf.cast(tf.math.ceil(tf.clip_by_value(x2, 0.0, width)), tf.int32)
+    y2 = tf.cast(tf.math.ceil(tf.clip_by_value(y2, 0.0, height)), tf.int32)
+    return x1, y1, x2, y2
+
+
+def rect_mask(image: tf.Tensor, x1: tf.Tensor, y1: tf.Tensor, x2: tf.Tensor, y2: tf.Tensor) -> tf.Tensor:
+    shape = tf.shape(image)
+    yy = tf.range(shape[0])[:, tf.newaxis]
+    xx = tf.range(shape[1])[tf.newaxis, :]
+    inside = (yy >= y1) & (yy < y2) & (xx >= x1) & (xx < x2)
+    return inside[..., tf.newaxis]
+
+
+def degrade_mask(image: tf.Tensor, bbox: tf.Tensor, band: float) -> tf.Tensor:
+    x1, y1, x2, y2 = bbox_rect(image, bbox, band)
+
+    def apply() -> tf.Tensor:
+        region = image[y1:y2, x1:x2]
+        fill = tf.reduce_mean(region, axis=[0, 1], keepdims=True)
+        return tf.where(rect_mask(image, x1, y1, x2, y2), tf.broadcast_to(fill, tf.shape(image)), image)
+
+    return tf.cond((x2 > x1) & (y2 > y1), apply, lambda: image)
+
+
+def degrade_pixelate(image: tf.Tensor, bbox: tf.Tensor, target_short: float) -> tf.Tensor:
+    x1, y1, x2, y2 = bbox_rect(image, bbox, 0.0)
+    region_height = y2 - y1
+    region_width = x2 - x1
+    short = tf.cast(tf.minimum(region_height, region_width), tf.float32)
+    factor = target_short / tf.maximum(short, 1.0)
+
+    def apply() -> tf.Tensor:
+        region = image[y1:y2, x1:x2]
+        small_height = tf.maximum(1, tf.cast(tf.round(tf.cast(region_height, tf.float32) * factor), tf.int32))
+        small_width = tf.maximum(1, tf.cast(tf.round(tf.cast(region_width, tf.float32) * factor), tf.int32))
+        small = tf.image.resize(region, (small_height, small_width), method="area")
+        back = tf.image.resize(small, (region_height, region_width), method="bilinear")
+        shape = tf.shape(image)
+        padded = tf.pad(back, [[y1, shape[0] - y2], [x1, shape[1] - x2], [0, 0]])
+        return tf.where(rect_mask(image, x1, y1, x2, y2), padded, image)
+
+    return tf.cond((x2 > x1) & (y2 > y1) & (factor < 1.0), apply, lambda: image)
+
+
+def degrade_downscale(image: tf.Tensor, long_side: float) -> tf.Tensor:
+    shape = tf.shape(image)
+    height = shape[0]
+    width = shape[1]
+    factor = long_side / tf.cast(tf.maximum(height, width), tf.float32)
+
+    def apply() -> tf.Tensor:
+        small_height = tf.maximum(1, tf.cast(tf.round(tf.cast(height, tf.float32) * factor), tf.int32))
+        small_width = tf.maximum(1, tf.cast(tf.round(tf.cast(width, tf.float32) * factor), tf.int32))
+        small = tf.image.resize(image, (small_height, small_width), method="area")
+        return tf.image.resize(small, (height, width), method="bilinear")
+
+    return tf.cond(factor < 1.0, apply, lambda: image)
+
+
+def apply_degradations(image: tf.Tensor, bbox: tf.Tensor) -> tf.Tensor:
+    if not DEGRADATIONS:
+        return image
+    has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
+    for kind, value in DEGRADATIONS:
+        if kind == "mask":
+            image = tf.cond(has_bbox, lambda img=image, v=value: degrade_mask(img, bbox, v), lambda img=image: img)
+        elif kind == "pixelate":
+            image = tf.cond(has_bbox, lambda img=image, v=value: degrade_pixelate(img, bbox, v), lambda img=image: img)
+        elif kind == "downscale":
+            image = degrade_downscale(image, value)
+    return image
+
+
 def load_image(
     path: tf.Tensor,
     label: tf.Tensor,
@@ -278,6 +407,8 @@ def load_image(
 ) -> tuple[tf.Tensor, tf.Tensor]:
     image = tf.io.read_file(path)
     image = tf.io.decode_image(image, channels=3, expand_animations=False)
+    image = tf.cast(image, tf.float32)
+    image = apply_degradations(image, bbox)
     if use_bbox_crop:
         image = crop_by_bbox(image, bbox, margin)
     elif bbox_aug_prob > 0.0:
@@ -553,6 +684,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-bbox-crop", type=str2bool, nargs="?", const=True, default=False, help="Crop images by CSV bbox column before resizing.")
     parser.add_argument("--margin", type=float, default=0.0, help="BBox crop margin percent. 5 expands by 5%%, -5 crops 5%% inside.")
     parser.add_argument("--bbox-aug-prob", type=float, default=0.0, help="Probability of applying bbox crop as augmentation during training (0.0 to disable).")
+    parser.add_argument(
+        "--degrade",
+        type=str,
+        default="",
+        help="Comma-separated anonymisation degradations applied to every split before crop/resize: "
+        "mask:BAND (fill document interior, keep BAND x bbox border), pixelate:N (document short side "
+        "to N px and back), downscale:N (frame long side to N px and back). E.g. mask:0.05,downscale:192",
+    )
     parser.add_argument("--comment", type=str, default="", help="Free-text note saved to report.json.")
     parser.add_argument(
         "--path-remap",
@@ -580,20 +719,44 @@ def main() -> None:
     if args.path_remap:
         print("Path remap:", [f"{old} -> {new}" for old, new in args.path_remap])
 
+    try:
+        DEGRADATIONS[:] = parse_degrade(args.degrade)
+    except ValueError as error:
+        raise SystemExit(f"--degrade: {error}") from error
+    if DEGRADATIONS:
+        print("Degradations:", ", ".join(f"{kind}:{value:g}" for kind, value in DEGRADATIONS))
+    degrade_needs_bbox = any(kind in ("mask", "pixelate") for kind, _ in DEGRADATIONS)
+    require_bbox = args.use_bbox_crop or degrade_needs_bbox
+
+    def check_degrade_bboxes(csv_path: Path, bbox_values: list[str]) -> None:
+        # A row without a bbox would pass through mask/pixelate untouched, i.e.
+        # un-anonymised -- and if that happens to one class more than the other
+        # the model learns it. Refuse rather than warn.
+        if not degrade_needs_bbox:
+            return
+        empty = sum(1 for value in bbox_values if not value)
+        if empty:
+            raise SystemExit(
+                f"{csv_path}: {empty} rows have no bbox but --degrade "
+                f"{args.degrade!r} needs one for every row"
+            )
+
     paths, labels, bboxes = read_csv_dataset(
         args.csv,
-        require_bbox=args.use_bbox_crop,
+        require_bbox=require_bbox,
         path_remaps=args.path_remap,
     )
+    check_degrade_bboxes(args.csv, bboxes)
     if args.validation_csv:
         train_paths = paths
         train_labels = labels
         train_bboxes = bboxes
         validation_paths, validation_labels, validation_bboxes = read_csv_dataset(
             args.validation_csv,
-            require_bbox=args.use_bbox_crop,
+            require_bbox=require_bbox,
             path_remaps=args.path_remap,
         )
+        check_degrade_bboxes(args.validation_csv, validation_bboxes)
         validation_csv = args.validation_csv
     else:
         train_indices, validation_indices = split_indices(labels, args.validation_split, args.seed)
@@ -628,9 +791,10 @@ def main() -> None:
     if args.test_csv:
         test_paths, test_labels, test_bboxes = read_csv_dataset(
             args.test_csv,
-            require_bbox=args.use_bbox_crop,
+            require_bbox=require_bbox,
             path_remaps=args.path_remap,
         )
+        check_degrade_bboxes(args.test_csv, test_bboxes)
         test_csv = args.test_csv
     else:
         test_paths, test_labels = paths, labels
@@ -738,6 +902,7 @@ def main() -> None:
             "margin": args.margin,
             "aug_prob": args.bbox_aug_prob,
         },
+        "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
         "comment": args.comment,
         "test_metrics": metrics,
         "test_eer_metrics": eer_metrics,

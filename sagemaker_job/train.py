@@ -215,6 +215,7 @@ def build_command(hps: dict[str, str]) -> list[str]:
         "eer_threshold": "--eer-threshold",
         "margin": "--margin",
         "bbox_aug_prob": "--bbox-aug-prob",
+        "degrade": "--degrade",
         "comment": "--comment",
     }
     for key, flag in scalar_flags.items():

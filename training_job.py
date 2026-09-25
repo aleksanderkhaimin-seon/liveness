@@ -155,6 +155,8 @@ def build_hyperparameters(args: argparse.Namespace, remaps: list[str], output_di
         hyperparameters["validation-csv"] = args.container_validation_csv
     if args.container_test_csv:
         hyperparameters["test-csv"] = args.container_test_csv
+    if args.degrade:
+        hyperparameters["degrade"] = args.degrade
     if args.comment:
         hyperparameters["comment"] = args.comment
     if remaps:
@@ -231,6 +233,11 @@ def parse_args() -> argparse.Namespace:
     training.add_argument("--use-bbox-crop", action="store_true")
     training.add_argument("--margin", type=float, default=0.0)
     training.add_argument("--bbox-aug-prob", type=float, default=0.0)
+    training.add_argument(
+        "--degrade",
+        default="",
+        help="Passed through to train_efficientnet_b2.py, e.g. mask:0.05,downscale:192",
+    )
     training.add_argument("--comment", default="", help="Free-text note saved to report.json.")
 
     return parser.parse_args()

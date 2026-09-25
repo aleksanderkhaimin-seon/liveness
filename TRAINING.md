@@ -103,6 +103,25 @@ Fine-tune the EfficientNetB2 backbone immediately:
 python train_efficientnet_b2.py --csv test_df.csv --train-backbone
 ```
 
+## Anonymisation Degradations
+
+`--degrade` applies content-destroying transforms to the decoded frame before any bbox crop and before the resize to 512. They run identically on train, validation and test and on both classes, so they cannot become a label shortcut. Use them to measure how much EER survives a given anonymisation before building the export for it.
+
+```bash
+python train_efficientnet_b2.py --csv train.csv --degrade mask:0.05
+python train_efficientnet_b2.py --csv train.csv --degrade mask:0.05,downscale:192
+DEGRADE=mask:0.05 docker compose up liveness-train
+python training_job.py --csv ... --degrade mask:0.05
+```
+
+| spec | effect | needs bbox |
+|---|---|---|
+| `mask:BAND` | fill the document interior with its per-channel mean, keeping a border band `BAND` × bbox size on each side (`0` fills the whole bbox) | yes |
+| `pixelate:N` | downsample the document interior so its short side is `N` px, then bilinear back; field text is ~4% of `N`, the face ~35% | yes |
+| `downscale:N` | downsample the whole frame to long side `N` px and back | no |
+
+Specs are comma-separated and applied left to right. `mask` and `pixelate` refuse to run if any row in any CSV lacks a bbox, because an untouched row would be un-anonymised. The applied list is recorded under `degrade` in `report.json`.
+
 ## Augmentations
 
 Training uses `albumentations` in the `tf.data` input pipeline:

@@ -57,6 +57,7 @@ services:
       USE_BBOX_CROP: "${USE_BBOX_CROP:-}"
       MARGIN: "${MARGIN:-}"
       BBOX_AUG_PROB: "${BBOX_AUG_PROB:-}"
+      DEGRADE: "${DEGRADE:-}"
       COMMENT: "${COMMENT:-}"
     command:
       - bash
@@ -79,6 +80,7 @@ services:
         $([ "$${USE_BBOX_CROP}" = "1" ] && echo "--use-bbox-crop")
         $${MARGIN:+--margin "$${MARGIN}"}
         $${BBOX_AUG_PROB:+--bbox-aug-prob "$${BBOX_AUG_PROB}"}
+        $${DEGRADE:+--degrade "$${DEGRADE}"}
         $${COMMENT:+--comment "$${COMMENT}"}
         2>&1 | tee -a runs/logs/training.log
 

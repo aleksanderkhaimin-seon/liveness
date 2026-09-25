@@ -306,6 +306,7 @@ def build_hyperparameters(
         "use_bbox_crop",
         "margin",
         "bbox_aug_prob",
+        "degrade",
         "comment",
     )
     for key in passthrough:
@@ -327,6 +328,7 @@ def build_hyperparameters(
         "use_bbox_crop": args.use_bbox_crop,
         "margin": args.margin,
         "bbox_aug_prob": args.bbox_aug_prob,
+        "degrade": args.degrade,
         "comment": args.comment,
     }
     for key, value in cli_overrides.items():
@@ -395,6 +397,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--margin", type=float)
     parser.add_argument("--bbox-aug-prob", type=float)
+    parser.add_argument(
+        "--degrade",
+        default=None,
+        help="Anonymisation degradations for train_efficientnet_b2.py, e.g. mask:0.05,downscale:192. "
+        "Overrides the config's degrade key.",
+    )
     parser.add_argument("--comment", default=None)
     parser.add_argument("--subnets", nargs="*", default=None)
     parser.add_argument("--security-group-ids", nargs="*", default=None)

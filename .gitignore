@@ -220,3 +220,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Liveness project: training artefacts, datasets, notebooks, detector samples
+runs/
+data/
+*.keras
+*.ipynb
+inference/detected.jpg

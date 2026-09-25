@@ -56,13 +56,63 @@ def hp(hps: dict[str, str], key: str) -> str:
     return SAMPLER_DEFAULTS[key]
 
 
-def sampler_script() -> Path:
-    script = CODE_DIR / "sample_document_patches.py"
+def staged_script(name: str) -> Path:
+    script = CODE_DIR / name
     if not script.is_file():
-        script = Path(__file__).resolve().parents[1] / "sample_document_patches.py"
+        script = Path(__file__).resolve().parents[1] / name
     if not script.is_file():
-        raise FileNotFoundError("sample_document_patches.py was not found in the job source")
+        raise FileNotFoundError(f"{name} was not found in the job source")
     return script
+
+
+def sampler_script() -> Path:
+    return staged_script("sample_document_patches.py")
+
+
+def drop_manifest(out_dir: Path) -> None:
+    manifest = out_dir / "manifest.csv"
+    if manifest.is_file():
+        manifest.unlink()
+        print(f"Removed re-identification map {manifest}")
+
+
+def aggregate_test_patches(manifest: Path, split: str = "test") -> None:
+    """Per-zone and per-document EER for a patch-sampled eval split.
+
+    Runs while the manifest still exists, writes only aggregates (no source
+    paths) into the model dir, and folds them into report.json under
+    patch_eer.<split> so the MLflow logger picks them up as metrics.
+    """
+    predictions = SM_MODEL_DIR / f"{split}_predictions.csv"
+    if not predictions.is_file():
+        print(f"No {predictions.name}; skipping patch aggregation for {split}")
+        return
+    json_out = SM_MODEL_DIR / f"patch_eer_{split}.json"
+    text_out = SM_MODEL_DIR / f"patch_eer_{split}.txt"
+    command = [
+        sys.executable,
+        "-u",
+        str(staged_script("aggregate_patch_eer.py")),
+        str(predictions),
+        str(manifest),
+        "--json-out",
+        str(json_out),
+    ]
+    print(f"Aggregating {split} patch predictions per zone and per document:")
+    print(" ".join(command))
+    result = subprocess.run(command, capture_output=True, text=True)
+    text_out.write_text(result.stdout + ("\n" + result.stderr if result.stderr else ""), encoding="utf-8")
+    print(result.stdout)
+    if result.returncode != 0:
+        print(f"Patch aggregation failed (exit {result.returncode}); see {text_out}")
+        return
+
+    report_path = SM_MODEL_DIR / "report.json"
+    if report_path.is_file() and json_out.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report.setdefault("patch_eer", {})[split] = json.loads(json_out.read_text(encoding="utf-8"))
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"Added patch_eer.{split} to {report_path}")
 
 
 def zone_weights(hps: dict[str, str]) -> str:
@@ -73,7 +123,7 @@ def zone_weights(hps: dict[str, str]) -> str:
     )
 
 
-def sample_split(name: str, input_csv: Path, hps: dict[str, str]) -> Path:
+def sample_split(name: str, input_csv: Path, hps: dict[str, str], keep_manifest: bool = False) -> Path:
     out_dir = PATCH_ROOT / name
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -135,16 +185,21 @@ def sample_split(name: str, input_csv: Path, hps: dict[str, str]) -> Path:
     if not patches_csv.is_file():
         raise FileNotFoundError(f"Sampler did not write {patches_csv}")
 
-    manifest = out_dir / "manifest.csv"
-    if manifest.is_file():
-        manifest.unlink()
-        print(f"Removed re-identification map {manifest}")
-
     summary_src = out_dir / "summary.json"
     if summary_src.is_file():
         dest = SM_MODEL_DIR / f"patch_summary_{name}.json"
         shutil.copy2(summary_src, dest)
         print(f"Saved {dest}")
+
+    if name != "train":
+        # Opaque patch id, label, zone -- no source paths -- so per-zone numbers
+        # stay recoverable after the manifest is gone.
+        shutil.copy2(patches_csv, SM_MODEL_DIR / f"patch_index_{name}.csv")
+
+    if keep_manifest:
+        print(f"Keeping {out_dir / 'manifest.csv'} until after aggregation")
+    else:
+        drop_manifest(out_dir)
 
     return patches_csv
 
@@ -218,11 +273,13 @@ def main() -> None:
     train_csv = sample_split("train", train_source, hps)
     val_csv = resolve_config_csv(config_path, "validation_csv", hps)
     test_csv = resolve_config_csv(config_path, "test_csv", hps)
+    test_manifest: Path | None = None
     if smtrain.truthy(hps.get("anonymize_eval")):
         if val_csv is not None:
             val_csv = sample_split("validation", val_csv, hps)
         if test_csv is not None:
-            test_csv = sample_split("test", test_csv, hps)
+            test_csv = sample_split("test", test_csv, hps, keep_manifest=True)
+            test_manifest = test_csv.parent / "manifest.csv"
     else:
         print(
             "WARNING: anonymize_eval=false -- validation/test are FULL FRAMES while training "
@@ -233,7 +290,14 @@ def main() -> None:
     command = build_command(hps, train_csv, val_csv, test_csv)
     print("Launching:")
     print(" ".join(command))
-    subprocess.run(command, check=True)
+    try:
+        subprocess.run(command, check=True)
+        if test_manifest is not None and test_manifest.is_file():
+            aggregate_test_patches(test_manifest, "test")
+    finally:
+        # Whatever happened above, the re-identification map does not leave the job.
+        if test_manifest is not None:
+            drop_manifest(test_manifest.parent)
 
     if config_path is not None:
         shutil.copy2(config_path, SM_MODEL_DIR / config_path.name)

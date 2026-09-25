@@ -60,6 +60,7 @@ def require_bbox_column(csv_path: Path) -> None:
 def stage_source(config_path: Path, config: dict, csv_paths: dict[str, Path]) -> tuple[Path, Path]:
     stage, config_rel = train_launch.stage_source(config_path, config, csv_paths)
     shutil.copy2(REPO_ROOT / "sample_document_patches.py", stage / "sample_document_patches.py")
+    shutil.copy2(REPO_ROOT / "aggregate_patch_eer.py", stage / "aggregate_patch_eer.py")
     shutil.copy2(REPO_ROOT / "sagemaker_job" / "train_anon.py", stage / "sagemaker_job" / "train_anon.py")
     return stage, config_rel
 

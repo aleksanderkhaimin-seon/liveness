@@ -20,6 +20,7 @@ Example:
 """
 import argparse
 import csv
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -112,19 +113,7 @@ def fmt(m: dict) -> str:
             f"EER={m['eer']:6.2f}%  AUC={m['auc']:.4f}  thr={m['eer_threshold']:.4f}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("predictions_csv", type=Path)
-    parser.add_argument("manifest_csv", type=Path)
-    parser.add_argument("--min-patches", type=int, default=1,
-                        help="Skip documents with fewer scored patches than this.")
-    parser.add_argument("--out-csv", type=Path, default=None,
-                        help="Write per-document aggregated scores here.")
-    args = parser.parse_args()
-
-    manifest = load_manifest(args.manifest_csv)
-    predictions = load_predictions(args.predictions_csv)
-
+def join_predictions(predictions: list[dict], manifest: dict[str, dict]) -> tuple[list[dict], int]:
     joined = []
     missing = 0
     for row in predictions:
@@ -135,64 +124,106 @@ def main() -> None:
         if int(meta["label"]) != row["label"]:
             raise SystemExit(f"Label mismatch for {row['patch_id']}: manifest={meta['label']} predictions={row['label']}")
         joined.append({**row, "zone": meta["zone"], "source_path": meta["source_path"]})
+    return joined, missing
 
+
+def compute_report(joined: list[dict], min_patches: int = 1) -> dict:
+    """All numbers as a nested dict: per patch (all / by zone), per document (by rule / by zone)."""
+    scores = np.array([r["score"] for r in joined])
+    labels = np.array([r["label"] for r in joined])
+    zones = np.array([r["zone"] for r in joined])
+    zone_names = sorted(set(zones))
+
+    by_doc: dict[str, list[dict]] = defaultdict(list)
+    for row in joined:
+        by_doc[row["source_path"]].append(row)
+    kept_docs = {k: v for k, v in by_doc.items() if len(v) >= min_patches}
+
+    per_document = {}
+    for rule in AGGREGATIONS:
+        doc_scores, doc_labels = [], []
+        for rows in kept_docs.values():
+            values = np.array([r["score"] for r in rows])
+            lg = np.array([r["logit"] for r in rows])
+            doc_scores.append(aggregate(values, lg, rule))
+            doc_labels.append(rows[0]["label"])
+        per_document[rule] = metrics(np.array(doc_scores), np.array(doc_labels))
+
+    per_document_by_zone = {}
+    for zone in zone_names:
+        doc_scores, doc_labels = [], []
+        for rows in by_doc.values():
+            zone_rows = [r for r in rows if r["zone"] == zone]
+            if len(zone_rows) < min_patches:
+                continue
+            doc_scores.append(float(np.mean([r["logit"] for r in zone_rows])))
+            doc_labels.append(zone_rows[0]["label"])
+        per_document_by_zone[zone] = metrics(np.array(doc_scores), np.array(doc_labels))
+
+    return {
+        "n_patches": len(joined),
+        "n_documents": len(by_doc),
+        "per_patch": {
+            "all": metrics(scores, labels),
+            "by_zone": {zone: metrics(scores[zones == zone], labels[zones == zone]) for zone in zone_names},
+        },
+        "per_document": per_document,
+        "per_document_by_zone_mean_logit": per_document_by_zone,
+        "document_scores_mean_logit": [
+            {"source_path": source, "label": rows[0]["label"],
+             "mean_logit": float(np.mean([r["logit"] for r in rows])), "n_patches": len(rows)}
+            for source, rows in kept_docs.items()
+        ],
+    }
+
+
+def print_report(report: dict) -> None:
+    print(f"Patches: {report['n_patches']}   documents: {report['n_documents']}\n")
+    print("== per patch ==")
+    print(f"  {'all':<10} {fmt(report['per_patch']['all'])}")
+    for zone, m in report["per_patch"]["by_zone"].items():
+        print(f"  {zone:<10} {fmt(m)}")
+    print("\n== per document, all zones ==")
+    for rule, m in report["per_document"].items():
+        print(f"  {rule:<16} {fmt(m)}")
+    print("\n== per document, by zone (mean_logit) ==")
+    for zone, m in report["per_document_by_zone_mean_logit"].items():
+        print(f"  {zone:<10} {fmt(m)}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("predictions_csv", type=Path)
+    parser.add_argument("manifest_csv", type=Path)
+    parser.add_argument("--min-patches", type=int, default=1,
+                        help="Skip documents with fewer scored patches than this.")
+    parser.add_argument("--out-csv", type=Path, default=None,
+                        help="Write per-document aggregated scores here (contains source paths).")
+    parser.add_argument("--json-out", type=Path, default=None,
+                        help="Write all metrics as JSON (no source paths) -- for report.json / MLflow.")
+    args = parser.parse_args()
+
+    joined, missing = join_predictions(load_predictions(args.predictions_csv), load_manifest(args.manifest_csv))
     if not joined:
         raise SystemExit("No predictions matched the manifest. Are these the right two files?")
     if missing:
         print(f"WARNING: {missing} predictions had no manifest entry and were skipped", file=sys.stderr)
 
-    scores = np.array([r["score"] for r in joined])
-    logits = np.array([r["logit"] for r in joined])
-    labels = np.array([r["label"] for r in joined])
-    zones = np.array([r["zone"] for r in joined])
-
-    print(f"Patches: {len(joined)}   documents: {len({r['source_path'] for r in joined})}\n")
-    print("== per patch ==")
-    print(f"  {'all':<10} {fmt(metrics(scores, labels))}")
-    for zone in sorted(set(zones)):
-        mask = zones == zone
-        print(f"  {zone:<10} {fmt(metrics(scores[mask], labels[mask]))}")
-
-    # group by document
-    by_doc: dict[str, list[dict]] = defaultdict(list)
-    for row in joined:
-        by_doc[row["source_path"]].append(row)
-
-    print("\n== per document, all zones ==")
-    doc_rows = []
-    for rule in AGGREGATIONS:
-        doc_scores, doc_labels = [], []
-        for source, rows in by_doc.items():
-            if len(rows) < args.min_patches:
-                continue
-            values = np.array([r["score"] for r in rows])
-            lg = np.array([r["logit"] for r in rows])
-            doc_scores.append(aggregate(values, lg, rule))
-            doc_labels.append(rows[0]["label"])
-        m = metrics(np.array(doc_scores), np.array(doc_labels))
-        print(f"  {rule:<16} {fmt(m)}")
-        if rule == "mean_logit":
-            doc_rows = [(s, sc, lb) for s, sc, lb in zip(
-                [k for k, v in by_doc.items() if len(v) >= args.min_patches], doc_scores, doc_labels)]
-
-    print("\n== per document, by zone (mean_logit) ==")
-    for zone in sorted(set(zones)):
-        doc_scores, doc_labels = [], []
-        for rows in by_doc.values():
-            zone_rows = [r for r in rows if r["zone"] == zone]
-            if len(zone_rows) < args.min_patches:
-                continue
-            doc_scores.append(float(np.mean([r["logit"] for r in zone_rows])))
-            doc_labels.append(zone_rows[0]["label"])
-        print(f"  {zone:<10} {fmt(metrics(np.array(doc_scores), np.array(doc_labels)))}")
+    report = compute_report(joined, args.min_patches)
+    print_report(report)
 
     if args.out_csv:
         with args.out_csv.open("w", encoding="utf-8", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow(["source_path", "label", "mean_logit", "n_patches"])
-            for source, score, label in doc_rows:
-                writer.writerow([source, label, score, len(by_doc[source])])
+            writer = csv.DictWriter(file, fieldnames=["source_path", "label", "mean_logit", "n_patches"])
+            writer.writeheader()
+            writer.writerows(report["document_scores_mean_logit"])
         print(f"\nPer-document scores: {args.out_csv}")
+
+    if args.json_out:
+        public = {k: v for k, v in report.items() if k != "document_scores_mean_logit"}
+        public["unmatched_predictions"] = missing
+        args.json_out.write_text(json.dumps(public, indent=2), encoding="utf-8")
+        print(f"Metrics JSON: {args.json_out}")
 
 
 if __name__ == "__main__":

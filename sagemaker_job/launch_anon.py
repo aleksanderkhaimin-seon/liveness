@@ -135,8 +135,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--anonymize-eval",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Also sample patches from validation_csv and test_csv. Those CSVs must have bbox.",
+        default=True,
+        help="Sample patches from validation_csv and test_csv too (they must have bbox). "
+        "Default on: a patch-trained model scored on full frames sees a 4-8x scale "
+        "mismatch and its EER is not interpretable. --no-anonymize-eval only for "
+        "deliberately measuring that mismatch.",
     )
     return parser.parse_args()
 
@@ -190,6 +193,13 @@ def main() -> None:
             path = csv_paths.get(key)
             if path is not None:
                 require_bbox_column(path)
+    else:
+        print(
+            "WARNING: --no-anonymize-eval: validation and test will be scored on FULL FRAMES "
+            "with a model trained on native-resolution patches. The resulting EER measures the "
+            "scale mismatch, not the model. runs/patch_expere_1 is what that looks like.",
+            flush=True,
+        )
 
     session = Session()
     role = args.role or get_execution_role()

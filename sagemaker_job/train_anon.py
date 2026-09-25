@@ -5,9 +5,10 @@ Reads the original (rewritten) train CSV from EFS, samples texture patches
 with sample_document_patches.py onto local disk, drops the re-identification
 manifest, then runs train_efficientnet_b2.py on patches.csv.
 
-Validation and test CSVs are left as full images by default so metrics stay
-comparable to the non-anonymised jobs. Pass anonymize_eval=true to sample
-those splits too (they must have a bbox column).
+Validation and test CSVs are sampled into patches as well (anonymize_eval,
+default true from launch_anon.py); they must have a bbox column. Scoring a
+patch-trained model on full frames measures a 4-8x scale mismatch rather
+than the model, so anonymize_eval=false is only for demonstrating that.
 """
 from __future__ import annotations
 
@@ -223,7 +224,11 @@ def main() -> None:
         if test_csv is not None:
             test_csv = sample_split("test", test_csv, hps)
     else:
-        print("Keeping original validation/test images (anonymize_eval=false)")
+        print(
+            "WARNING: anonymize_eval=false -- validation/test are FULL FRAMES while training "
+            "is native-resolution patches. EER from this job reflects the scale mismatch.",
+            flush=True,
+        )
 
     command = build_command(hps, train_csv, val_csv, test_csv)
     print("Launching:")

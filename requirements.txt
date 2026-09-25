@@ -1,4 +1,5 @@
 albumentations
+awscli
 numpy<2
 onnx==1.21.0
 onnxruntime

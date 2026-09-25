@@ -2,11 +2,15 @@
 import argparse
 import csv
 import json
+import math
+import shutil
 from pathlib import Path
 
 import albumentations as A
 import numpy as np
 import tensorflow as tf
+
+from eer import compute_eer, get_fr_fa_at_threshold
 
 
 AUTOTUNE = tf.data.AUTOTUNE
@@ -50,7 +54,35 @@ def configure_runtime(require_gpu: bool, mixed_precision: bool) -> None:
         print("Mixed precision: enabled")
 
 
-def read_csv_dataset(csv_path: Path) -> tuple[list[str], list[int]]:
+def normalize_bbox_value(raw_bbox: str, csv_path: Path, row_number: int, require_bbox: bool) -> str:
+    bbox = raw_bbox.strip()
+    if bbox.lower() in {"", "none", "null", "nan"}:
+        return ""
+
+    try:
+        values = json.loads(bbox)
+    except json.JSONDecodeError as error:
+        if not require_bbox:
+            return bbox
+        raise ValueError(f"Invalid bbox JSON at {csv_path}:{row_number}: {bbox!r}") from error
+
+    if not isinstance(values, list) or len(values) != 4:
+        raise ValueError(f"bbox must be a JSON list [x1,y1,x2,y2] at {csv_path}:{row_number}: {bbox!r}")
+
+    try:
+        x1, y1, x2, y2 = [float(value) for value in values]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"bbox values must be numeric at {csv_path}:{row_number}: {bbox!r}") from error
+
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+        raise ValueError(f"bbox values must be finite at {csv_path}:{row_number}: {bbox!r}")
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"bbox must satisfy x2 > x1 and y2 > y1 at {csv_path}:{row_number}: {bbox!r}")
+
+    return json.dumps([x1, y1, x2, y2], separators=(",", ":"))
+
+
+def read_csv_dataset(csv_path: Path, require_bbox: bool = False) -> tuple[list[str], list[int], list[str]]:
     if not csv_path.exists():
         raise FileNotFoundError(
             f"CSV file not found: {csv_path}. Expected columns: path,label"
@@ -58,11 +90,14 @@ def read_csv_dataset(csv_path: Path) -> tuple[list[str], list[int]]:
 
     image_paths = []
     labels = []
+    bboxes = []
 
     with csv_path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         if not reader.fieldnames or "path" not in reader.fieldnames or "label" not in reader.fieldnames:
             raise ValueError(f"{csv_path} must contain columns named path and label")
+        if require_bbox and "bbox" not in reader.fieldnames:
+            raise ValueError(f"{csv_path} must contain a bbox column when --use-bbox-crop is set")
 
         for row_number, row in enumerate(reader, start=2):
             raw_path = row["path"].strip()
@@ -80,11 +115,19 @@ def read_csv_dataset(csv_path: Path) -> tuple[list[str], list[int]]:
 
             image_paths.append(str(image_path))
             labels.append(label)
+            bboxes.append(
+                normalize_bbox_value(
+                    row.get("bbox", ""),
+                    csv_path=csv_path,
+                    row_number=row_number,
+                    require_bbox=require_bbox,
+                )
+            )
 
     if not image_paths:
         raise ValueError(f"No rows found in {csv_path}")
 
-    return image_paths, labels
+    return image_paths, labels, bboxes
 
 
 def split_indices(labels: list[int], validation_split: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -112,9 +155,75 @@ def split_indices(labels: list[int], validation_split: float, seed: int) -> tupl
     return np.asarray(train_indices), np.asarray(validation_indices)
 
 
-def load_image(path: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+def parse_bbox(bbox: tf.Tensor) -> tf.Tensor:
+    bbox = tf.strings.strip(bbox)
+    bbox = tf.strings.regex_replace(bbox, r"^\s*\[", "")
+    bbox = tf.strings.regex_replace(bbox, r"\]\s*$", "")
+    parts = tf.strings.split(bbox, sep=",")
+    values = tf.strings.to_number(parts, out_type=tf.float32)
+    return values
+
+
+def crop_by_bbox(image: tf.Tensor, bbox: tf.Tensor, margin: float) -> tf.Tensor:
+    def crop() -> tf.Tensor:
+        bbox_values = parse_bbox(bbox)
+        bbox_values = tf.ensure_shape(bbox_values, [4])
+        image_shape = tf.shape(image)
+        image_height = tf.cast(image_shape[0], tf.float32)
+        image_width = tf.cast(image_shape[1], tf.float32)
+
+        x1, y1, x2, y2 = tf.unstack(bbox_values, num=4)
+        box_width = x2 - x1
+        box_height = y2 - y1
+        margin_ratio = tf.cast(margin / 100.0, tf.float32)
+
+        x1_margin = x1 - box_width * margin_ratio
+        y1_margin = y1 - box_height * margin_ratio
+        x2_margin = x2 + box_width * margin_ratio
+        y2_margin = y2 + box_height * margin_ratio
+
+        image_height_int = image_shape[0]
+        image_width_int = image_shape[1]
+
+        x1_clipped = tf.clip_by_value(x1_margin, 0.0, image_width)
+        y1_clipped = tf.clip_by_value(y1_margin, 0.0, image_height)
+        x2_clipped = tf.clip_by_value(x2_margin, 0.0, image_width)
+        y2_clipped = tf.clip_by_value(y2_margin, 0.0, image_height)
+
+        crop_x = tf.cast(tf.floor(x1_clipped), tf.int32)
+        crop_y = tf.cast(tf.floor(y1_clipped), tf.int32)
+        crop_x2 = tf.cast(tf.math.ceil(x2_clipped), tf.int32)
+        crop_y2 = tf.cast(tf.math.ceil(y2_clipped), tf.int32)
+
+        crop_x = tf.clip_by_value(crop_x, 0, image_width_int - 1)
+        crop_y = tf.clip_by_value(crop_y, 0, image_height_int - 1)
+        crop_x2 = tf.clip_by_value(crop_x2, crop_x + 1, image_width_int)
+        crop_y2 = tf.clip_by_value(crop_y2, crop_y + 1, image_height_int)
+
+        crop_width = crop_x2 - crop_x
+        crop_height = crop_y2 - crop_y
+        return tf.image.crop_to_bounding_box(image, crop_y, crop_x, crop_height, crop_width)
+
+    has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
+    return tf.cond(has_bbox, crop, lambda: image)
+
+
+def load_image(
+    path: tf.Tensor,
+    label: tf.Tensor,
+    bbox: tf.Tensor,
+    use_bbox_crop: bool,
+    margin: float,
+    bbox_aug_prob: float = 0.0,
+) -> tuple[tf.Tensor, tf.Tensor]:
     image = tf.io.read_file(path)
     image = tf.io.decode_image(image, channels=3, expand_animations=False)
+    if use_bbox_crop:
+        image = crop_by_bbox(image, bbox, margin)
+    elif bbox_aug_prob > 0.0:
+        has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
+        should_crop = tf.math.logical_and(has_bbox, tf.random.uniform(()) < bbox_aug_prob)
+        image = tf.cond(should_crop, lambda: crop_by_bbox(image, bbox, margin), lambda: image)
     image = tf.image.resize(image, (IMAGE_SIZE, IMAGE_SIZE), method="bilinear")
     image = tf.cast(image, tf.float32)
     label = tf.cast(label, tf.float32)
@@ -133,20 +242,57 @@ def augment_image(image: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Ten
     return image, label
 
 
-def make_dataset(paths: list[str], labels: list[int], batch_size: int, training: bool) -> tf.data.Dataset:
-    dataset = tf.data.Dataset.from_tensor_slices((paths, labels))
+def make_dataset(
+    paths: list[str],
+    labels: list[int],
+    bboxes: list[str],
+    batch_size: int,
+    training: bool,
+    use_bbox_crop: bool,
+    margin: float,
+    bbox_aug_prob: float = 0.0,
+) -> tf.data.Dataset:
+    dataset = tf.data.Dataset.from_tensor_slices((paths, labels, bboxes))
     if training:
         dataset = dataset.shuffle(buffer_size=len(paths), reshuffle_each_iteration=True)
 
-    dataset = dataset.map(load_image, num_parallel_calls=AUTOTUNE)
+    aug_prob = bbox_aug_prob if training else 0.0
+    dataset = dataset.map(
+        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, aug_prob),
+        num_parallel_calls=AUTOTUNE,
+    )
     if training:
         dataset = dataset.map(augment_image, num_parallel_calls=AUTOTUNE)
     dataset = dataset.batch(batch_size).prefetch(AUTOTUNE)
     return dataset
 
 
-def build_model(
+def build_learning_rate(
     learning_rate: float,
+    use_cosine_decay: bool,
+    decay_steps: int,
+    min_learning_rate: float,
+):
+    if not use_cosine_decay:
+        return learning_rate
+
+    if decay_steps <= 0:
+        raise ValueError("Cosine decay requires decay_steps > 0")
+    if min_learning_rate < 0:
+        raise ValueError("min_learning_rate must be >= 0")
+    if min_learning_rate > learning_rate:
+        raise ValueError("min_learning_rate must be <= learning_rate")
+
+    alpha = min_learning_rate / learning_rate if learning_rate > 0 else 0.0
+    return tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=learning_rate,
+        decay_steps=decay_steps,
+        alpha=alpha,
+    )
+
+
+def build_model(
+    learning_rate,
     train_backbone: bool,
     backbone_weights: str | None = "imagenet",
 ) -> tf.keras.Model:
@@ -191,8 +337,124 @@ def sigmoid_np(values: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-values))
 
 
-def write_predictions(model: tf.keras.Model, paths: list[str], labels: list[int], output_path: Path, batch_size: int) -> None:
-    dataset = make_dataset(paths, labels, batch_size=batch_size, training=False)
+def compute_eer_metrics(labels: list[int], scores: np.ndarray, threshold: float) -> dict[str, float]:
+    labels_array = np.asarray(labels, dtype=np.int32)
+    scores_array = np.asarray(scores, dtype=np.float32)
+
+    tar = scores_array[labels_array == 1]
+    imp = scores_array[labels_array == 0]
+    tar = tar[~np.isnan(tar)]
+    imp = imp[~np.isnan(imp)]
+
+    if len(tar) == 0 or len(imp) == 0:
+        return {
+            "bpcer": float("nan"),
+            "apcer": float("nan"),
+            "acer": float("nan"),
+            "eer": float("nan"),
+            "eer_threshold": float("nan"),
+            "threshold": threshold,
+        }
+
+    bpcer, apcer = get_fr_fa_at_threshold(tar=tar, imp=imp, threshold=threshold)
+    eer, eer_threshold = compute_eer(tar=tar, imp=imp)
+    return {
+        "bpcer": float(bpcer),
+        "apcer": float(apcer),
+        "acer": float((bpcer + apcer) / 2.0),
+        "eer": float(eer),
+        "eer_threshold": float(eer_threshold),
+        "threshold": threshold,
+    }
+
+
+class EERCallback(tf.keras.callbacks.Callback):
+    def __init__(
+        self,
+        paths: list[str],
+        labels: list[int],
+        bboxes: list[str],
+        batch_size: int,
+        threshold: float,
+        use_bbox_crop: bool,
+        margin: float,
+        prefix: str = "val",
+    ) -> None:
+        super().__init__()
+        self.paths = paths
+        self.labels = labels
+        self.bboxes = bboxes
+        self.batch_size = batch_size
+        self.threshold = threshold
+        self.prefix = prefix
+        self.dataset = make_dataset(
+            paths,
+            labels,
+            bboxes,
+            batch_size=batch_size,
+            training=False,
+            use_bbox_crop=use_bbox_crop,
+            margin=margin,
+        )
+
+    def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+        logs = logs if logs is not None else {}
+        logits = self.model.predict(self.dataset, verbose=0).reshape(-1)
+        scores = sigmoid_np(logits)
+        metrics = compute_eer_metrics(self.labels, scores, self.threshold)
+
+        logs[f"{self.prefix}_bpcer"] = metrics["bpcer"]
+        logs[f"{self.prefix}_apcer"] = metrics["apcer"]
+        logs[f"{self.prefix}_acer"] = metrics["acer"]
+        logs[f"{self.prefix}_eer"] = metrics["eer"]
+        logs[f"{self.prefix}_eer_threshold"] = metrics["eer_threshold"]
+
+        print(
+            f"\n{self.prefix}_bpcer: {metrics['bpcer']:.4f} - "
+            f"{self.prefix}_apcer: {metrics['apcer']:.4f} - "
+            f"{self.prefix}_acer: {metrics['acer']:.4f} - "
+            f"{self.prefix}_eer: {metrics['eer']:.4f} - "
+            f"{self.prefix}_eer_threshold: {metrics['eer_threshold']:.6f}"
+        )
+
+
+class LearningRateLogger(tf.keras.callbacks.Callback):
+    def _current_learning_rate(self) -> float:
+        learning_rate = self.model.optimizer.learning_rate
+
+        if callable(learning_rate):
+            learning_rate = learning_rate(self.model.optimizer.iterations)
+
+        if hasattr(learning_rate, "numpy"):
+            return float(learning_rate.numpy())
+
+        return float(tf.keras.backend.get_value(learning_rate))
+
+    def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+        logs = logs if logs is not None else {}
+        logs["learning_rate"] = self._current_learning_rate()
+        print(f"\nlearning_rate: {logs['learning_rate']:.10f}")
+
+
+def write_predictions(
+    model: tf.keras.Model,
+    paths: list[str],
+    labels: list[int],
+    bboxes: list[str],
+    output_path: Path,
+    batch_size: int,
+    use_bbox_crop: bool,
+    margin: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    dataset = make_dataset(
+        paths,
+        labels,
+        bboxes,
+        batch_size=batch_size,
+        training=False,
+        use_bbox_crop=use_bbox_crop,
+        margin=margin,
+    )
     logits = model.predict(dataset).reshape(-1)
     scores = sigmoid_np(logits)
 
@@ -203,20 +465,140 @@ def write_predictions(model: tf.keras.Model, paths: list[str], labels: list[int]
         for path, label, logit, score in zip(paths, labels, logits, scores):
             writer.writerow([path, label, float(logit), float(score), int(logit >= 0.0)])
 
+    return logits, scores
+
+
+PATH_KEYS = ("csv", "validation_csv", "test_csv", "output_dir")
+BOOL_KEYS = (
+    "cosine_decay",
+    "train_backbone",
+    "require_gpu",
+    "mixed_precision",
+    "use_bbox_crop",
+)
+CONFIG_DEFAULTS = {
+    "csv": Path("test_df.csv"),
+    "validation_csv": None,
+    "test_csv": None,
+    "output_dir": Path("runs/efficientnet_b2"),
+    "epochs": 12,
+    "batch_size": 32,
+    "learning_rate": 1e-5,
+    "cosine_decay": False,
+    "min_learning_rate": 0.0,
+    "validation_split": 0.1,
+    "seed": 42,
+    "train_backbone": False,
+    "require_gpu": False,
+    "mixed_precision": False,
+    "eer_threshold": 0.5,
+    "use_bbox_crop": False,
+    "margin": 0.0,
+    "bbox_aug_prob": 0.0,
+    "comment": "",
+}
+
+
+def _normalize_config_key(key: str) -> str:
+    return key.strip().replace("-", "_")
+
+
+def load_config_file(path: Path) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    if suffix in {".yaml", ".yml"}:
+        try:
+            import yaml
+        except ImportError as error:
+            raise RuntimeError("PyYAML is required for .yaml/.yml configs") from error
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Config must be a JSON/YAML object, got {type(data).__name__}")
+
+    unknown = []
+    parsed = {}
+    for raw_key, value in data.items():
+        key = _normalize_config_key(str(raw_key))
+        if key in {"config"}:
+            continue
+        if key not in CONFIG_DEFAULTS:
+            unknown.append(raw_key)
+            continue
+        if key in PATH_KEYS:
+            parsed[key] = None if value in (None, "") else Path(value)
+        else:
+            parsed[key] = value
+
+    if unknown:
+        raise ValueError(f"Unknown config keys: {unknown}. Allowed: {sorted(CONFIG_DEFAULTS)}")
+    return parsed
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train EfficientNetB2 for binary liveness classification.")
-    parser.add_argument("--csv", type=Path, default=Path("test_df.csv"), help="CSV with path,label columns.")
-    parser.add_argument("--output-dir", type=Path, default=Path("runs/efficientnet_b2"), help="Where to save model and reports.")
-    parser.add_argument("--epochs", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--learning-rate", type=float, default=1e-5)
-    parser.add_argument("--validation-split", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--train-backbone", action="store_true", help="Fine-tune EfficientNetB2 from the first epoch.")
-    parser.add_argument("--require-gpu", action="store_true", help="Fail if TensorFlow cannot see a GPU.")
-    parser.add_argument("--mixed-precision", action="store_true", help="Use mixed precision, useful on NVIDIA T4.")
-    return parser.parse_args()
+    parser = argparse.ArgumentParser(
+        description="Train EfficientNetB2 for binary liveness classification. Prefer --config; CLI flags override the file.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="JSON or YAML file with training settings. CLI flags override the file.",
+    )
+    parser.add_argument("--csv", type=Path, help="CSV with path,label columns.")
+    parser.add_argument("--validation-csv", type=Path, help="Optional fixed validation CSV. If omitted, validation is split from --csv.")
+    parser.add_argument("--test-csv", type=Path, help="Optional extra CSV used only for final testing and EER.")
+    parser.add_argument("--output-dir", type=Path, help="Where to save model and reports.")
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--cosine-decay", action=argparse.BooleanOptionalAction, default=None, help="Use cosine decay from --learning-rate to --min-learning-rate.")
+    parser.add_argument("--min-learning-rate", type=float, help="Final LR floor for cosine decay.")
+    parser.add_argument("--validation-split", type=float)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--train-backbone", action=argparse.BooleanOptionalAction, default=None, help="Fine-tune EfficientNetB2 from the first epoch.")
+    parser.add_argument("--require-gpu", action=argparse.BooleanOptionalAction, default=None, help="Fail if TensorFlow cannot see a GPU.")
+    parser.add_argument("--mixed-precision", action=argparse.BooleanOptionalAction, default=None, help="Use mixed precision, useful on NVIDIA T4.")
+    parser.add_argument("--eer-threshold", type=float, help="Threshold for BPCER/APCER/ACER on sigmoid scores.")
+    parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=None, help="Crop images by CSV bbox column before resizing.")
+    parser.add_argument("--margin", type=float, help="BBox crop margin percent. 5 expands by 5%%, -5 crops 5%% inside.")
+    parser.add_argument("--bbox-aug-prob", type=float, help="Probability of applying bbox crop as augmentation during training (0.0 to disable).")
+    parser.add_argument("--comment", type=str, help="Free-text note saved to report.json.")
+    args = parser.parse_args()
+
+    merged = dict(CONFIG_DEFAULTS)
+    if args.config is not None:
+        merged.update(load_config_file(args.config))
+
+    for key in CONFIG_DEFAULTS:
+        cli_value = getattr(args, key)
+        if cli_value is not None:
+            merged[key] = cli_value
+
+    for key in BOOL_KEYS:
+        merged[key] = bool(merged[key])
+
+    resolved = argparse.Namespace(**merged, config=args.config)
+    print("Resolved training config:")
+    print(json.dumps(config_as_dict(resolved), indent=2))
+    return resolved
+
+
+def config_as_dict(args: argparse.Namespace) -> dict:
+    payload = {}
+    for key in CONFIG_DEFAULTS:
+        value = getattr(args, key)
+        if isinstance(value, Path):
+            payload[key] = str(value)
+        else:
+            payload[key] = value
+    if args.config is not None:
+        payload["config"] = str(args.config)
+    return payload
 
 
 def main() -> None:
@@ -224,20 +606,82 @@ def main() -> None:
     tf.keras.utils.set_random_seed(args.seed)
     configure_runtime(args.require_gpu, args.mixed_precision)
 
-    paths, labels = read_csv_dataset(args.csv)
-    train_indices, validation_indices = split_indices(labels, args.validation_split, args.seed)
+    paths, labels, bboxes = read_csv_dataset(args.csv, require_bbox=args.use_bbox_crop)
+    if args.validation_csv:
+        train_paths = paths
+        train_labels = labels
+        train_bboxes = bboxes
+        validation_paths, validation_labels, validation_bboxes = read_csv_dataset(
+            args.validation_csv,
+            require_bbox=args.use_bbox_crop,
+        )
+        validation_csv = args.validation_csv
+    else:
+        train_indices, validation_indices = split_indices(labels, args.validation_split, args.seed)
+        train_paths = [paths[index] for index in train_indices]
+        train_labels = [labels[index] for index in train_indices]
+        train_bboxes = [bboxes[index] for index in train_indices]
+        validation_paths = [paths[index] for index in validation_indices]
+        validation_labels = [labels[index] for index in validation_indices]
+        validation_bboxes = [bboxes[index] for index in validation_indices]
+        validation_csv = None
 
-    train_paths = [paths[index] for index in train_indices]
-    train_labels = [labels[index] for index in train_indices]
-    validation_paths = [paths[index] for index in validation_indices]
-    validation_labels = [labels[index] for index in validation_indices]
+    train_dataset = make_dataset(
+        train_paths,
+        train_labels,
+        train_bboxes,
+        args.batch_size,
+        training=True,
+        use_bbox_crop=args.use_bbox_crop,
+        margin=args.margin,
+        bbox_aug_prob=args.bbox_aug_prob,
+    )
+    validation_dataset = make_dataset(
+        validation_paths,
+        validation_labels,
+        validation_bboxes,
+        args.batch_size,
+        training=False,
+        use_bbox_crop=args.use_bbox_crop,
+        margin=args.margin,
+    )
 
-    train_dataset = make_dataset(train_paths, train_labels, args.batch_size, training=True)
-    validation_dataset = make_dataset(validation_paths, validation_labels, args.batch_size, training=False)
-    test_dataset = make_dataset(paths, labels, args.batch_size, training=False)
+    if args.test_csv:
+        test_paths, test_labels, test_bboxes = read_csv_dataset(
+            args.test_csv,
+            require_bbox=args.use_bbox_crop,
+        )
+        test_csv = args.test_csv
+    else:
+        test_paths, test_labels = paths, labels
+        test_bboxes = bboxes
+        test_csv = args.csv
 
-    model = build_model(args.learning_rate, args.train_backbone)
+    test_dataset = make_dataset(
+        test_paths,
+        test_labels,
+        test_bboxes,
+        args.batch_size,
+        training=False,
+        use_bbox_crop=args.use_bbox_crop,
+        margin=args.margin,
+    )
+
+    train_steps_per_epoch = int(np.ceil(len(train_paths) / args.batch_size))
+    decay_steps = train_steps_per_epoch * args.epochs
+    learning_rate = build_learning_rate(
+        learning_rate=args.learning_rate,
+        use_cosine_decay=args.cosine_decay,
+        decay_steps=decay_steps,
+        min_learning_rate=args.min_learning_rate,
+    )
+
+    model = build_model(learning_rate, args.train_backbone)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.config is not None:
+        shutil.copy2(args.config, args.output_dir / args.config.name)
+    with (args.output_dir / "train_config.json").open("w", encoding="utf-8") as file:
+        json.dump(config_as_dict(args), file, indent=2)
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -252,21 +696,27 @@ def main() -> None:
             mode="max",
             save_best_only=False,
         ),
+        EERCallback(
+            paths=validation_paths,
+            labels=validation_labels,
+            bboxes=validation_bboxes,
+            batch_size=args.batch_size,
+            threshold=args.eer_threshold,
+            use_bbox_crop=args.use_bbox_crop,
+            margin=args.margin,
+            prefix="val",
+        ),
+        LearningRateLogger(),
         tf.keras.callbacks.TensorBoard(
             log_dir=str(args.output_dir / "tensorboard"),
             histogram_freq=1,
             write_graph=True,
             update_freq="epoch",
         ),
-        tf.keras.callbacks.EarlyStopping(
-            monitor="val_auc",
-            mode="max",
-            patience=3,
-            restore_best_weights=True,
-        ),
         tf.keras.callbacks.CSVLogger(str(args.output_dir / "history.csv")),
     ]
 
+    print(f"Starting training for requested epochs: {args.epochs}")
     history = model.fit(
         train_dataset,
         validation_data=validation_dataset,
@@ -276,21 +726,56 @@ def main() -> None:
     )
 
     model.save(args.output_dir / "last.keras")
+    model = tf.keras.models.load_model(args.output_dir / "best.keras", compile=True)
     metrics = model.evaluate(test_dataset, return_dict=True)
-    write_predictions(model, paths, labels, args.output_dir / "test_predictions.csv", args.batch_size)
+    _, test_scores = write_predictions(
+        model,
+        test_paths,
+        test_labels,
+        test_bboxes,
+        args.output_dir / "test_predictions.csv",
+        args.batch_size,
+        use_bbox_crop=args.use_bbox_crop,
+        margin=args.margin,
+    )
+    eer_metrics = compute_eer_metrics(test_labels, test_scores, args.eer_threshold)
 
     report = {
         "csv": str(args.csv),
+        "validation_csv": str(validation_csv) if validation_csv else None,
+        "test_csv": str(test_csv),
         "samples": len(paths),
+        "test_samples": len(test_paths),
         "train_samples": len(train_paths),
         "validation_samples": len(validation_paths),
+        "requested_epochs": args.epochs,
+        "completed_epochs": len(history.history.get("loss", [])),
+        "learning_rate": {
+            "initial": args.learning_rate,
+            "cosine_decay": args.cosine_decay,
+            "min": args.min_learning_rate,
+            "decay_steps": decay_steps if args.cosine_decay else None,
+            "train_steps_per_epoch": train_steps_per_epoch,
+        },
+        "bbox_crop": {
+            "enabled": args.use_bbox_crop,
+            "margin": args.margin,
+            "aug_prob": args.bbox_aug_prob,
+        },
+        "comment": args.comment,
+        "config": config_as_dict(args),
         "test_metrics": metrics,
+        "test_eer_metrics": eer_metrics,
         "history": history.history,
     }
     with (args.output_dir / "report.json").open("w", encoding="utf-8") as file:
         json.dump(report, file, indent=2)
 
-    print(json.dumps({"output_dir": str(args.output_dir), "test_metrics": metrics}, indent=2))
+    print(json.dumps({
+        "output_dir": str(args.output_dir),
+        "test_metrics": metrics,
+        "test_eer_metrics": eer_metrics,
+    }, indent=2))
 
 
 if __name__ == "__main__":

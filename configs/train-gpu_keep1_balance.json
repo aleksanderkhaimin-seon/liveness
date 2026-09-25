@@ -1,0 +1,21 @@
+{
+  "csv": "data/train_Seon-PintV1_ah_augvol1_interns_clean_no-unidata_no-docxpand_balanced_keep1.csv",
+  "validation_csv": "data/ProdTest-0.3.csv",
+  "test_csv": "data/test_Pinterest_v_1_checked.csv",
+  "output_dir": "runs/efficientnet_b2_haia2/exp_7",
+  "epochs": 3,
+  "batch_size": 32,
+  "learning_rate": 1e-3,
+  "cosine_decay": true,
+  "min_learning_rate": 1e-7,
+  "validation_split": 0.1,
+  "seed": 42,
+  "train_backbone": true,
+  "require_gpu": true,
+  "mixed_precision": true,
+  "eer_threshold": 0.5,
+  "use_bbox_crop": false,
+  "margin": 5,
+  "bbox_aug_prob": 0.0,
+  "comment": "snapshot of september 2026. Correct SPLIT, balance by dropping 1's samples. Standart default augm. Val on prod data, seon_replay_ah,seon_replay_idv3448, seon_scrapeseon_replay_idv3472, Pinterest Live, PC_aug_2026_vol1, PC_interns_vol1, CLEANED data. No QRs"
+}

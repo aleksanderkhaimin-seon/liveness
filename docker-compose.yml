@@ -22,3 +22,123 @@ services:
       PYTHONUNBUFFERED: "1"
       NVIDIA_VISIBLE_DEVICES: "0"
       NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+
+  liveness-train:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+      args:
+        TENSORFLOW_IMAGE: tensorflow/tensorflow:2.21.0-gpu-jupyter
+    container_name: liveness-train
+    runtime: nvidia
+    working_dir: /mnt/userefs/aleksandr_khaimin/Work/liveness
+    volumes:
+      - .:/mnt/userefs/aleksandr_khaimin/Work/liveness
+      - /mnt/dataefs/data/datalake:/mnt/dataefs/data/datalake
+      - /mnt/userefs/aleksandr_khaimin/Work:/mnt/userefs/aleksandr_khaimin/Work
+    gpus: "all"
+    shm_size: "12gb"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      TRAIN_CSV: "${TRAIN_CSV:-test_df.csv}"
+      VALIDATION_CSV: "${VALIDATION_CSV:-}"
+      TEST_CSV: "${TEST_CSV:-}"
+      OUTPUT_DIR: "${OUTPUT_DIR:-runs/efficientnet_b2}"
+      EPOCHS: "${EPOCHS:-35}"
+      BATCH_SIZE: "${BATCH_SIZE:-32}"
+      LEARNING_RATE: "${LEARNING_RATE:-1e-5}"
+      COSINE_DECAY: "${COSINE_DECAY:-}"
+      MIN_LEARNING_RATE: "${MIN_LEARNING_RATE:-}"
+      TRAIN_BACKBONE: "${TRAIN_BACKBONE:-}"
+      MIXED_PRECISION: "${MIXED_PRECISION:-}"
+      REQUIRE_GPU: "${REQUIRE_GPU:-}"
+      USE_BBOX_CROP: "${USE_BBOX_CROP:-}"
+      MARGIN: "${MARGIN:-}"
+      BBOX_AUG_PROB: "${BBOX_AUG_PROB:-}"
+      COMMENT: "${COMMENT:-}"
+    command:
+      - bash
+      - -lc
+      - >
+        mkdir -p runs/logs &&
+        python -u train_efficientnet_b2.py
+        --csv "$${TRAIN_CSV:-test_df.csv}"
+        $${VALIDATION_CSV:+--validation-csv "$${VALIDATION_CSV}"}
+        $${TEST_CSV:+--test-csv "$${TEST_CSV}"}
+        --output-dir "$${OUTPUT_DIR:-runs/efficientnet_b2}"
+        --epochs "$${EPOCHS:-35}"
+        --batch-size "$${BATCH_SIZE:-32}"
+        --learning-rate "$${LEARNING_RATE:-1e-5}"
+        $([ "$${COSINE_DECAY}" = "1" ] && echo "--cosine-decay")
+        $${MIN_LEARNING_RATE:+--min-learning-rate "$${MIN_LEARNING_RATE}"}
+        $([ "$${TRAIN_BACKBONE}" = "1" ] && echo "--train-backbone")
+        $([ "$${MIXED_PRECISION}" = "1" ] && echo "--mixed-precision")
+        $([ "$${REQUIRE_GPU}" = "1" ] && echo "--require-gpu")
+        $([ "$${USE_BBOX_CROP}" = "1" ] && echo "--use-bbox-crop")
+        $${MARGIN:+--margin "$${MARGIN}"}
+        $${BBOX_AUG_PROB:+--bbox-aug-prob "$${BBOX_AUG_PROB}"}
+        $${COMMENT:+--comment "$${COMMENT}"}
+        2>&1 | tee -a runs/logs/training.log
+
+  liveness-predict:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+      args:
+        TENSORFLOW_IMAGE: tensorflow/tensorflow:2.21.0-gpu-jupyter
+    container_name: liveness-predict
+    working_dir: /mnt/userefs/aleksandr_khaimin/Work/liveness
+    volumes:
+      - .:/mnt/userefs/aleksandr_khaimin/Work/liveness
+      - /mnt/dataefs/data/datalake:/mnt/dataefs/data/datalake
+      - /mnt/userefs/aleksandr_khaimin/Work:/mnt/userefs/aleksandr_khaimin/Work
+    shm_size: "4gb"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CUDA_VISIBLE_DEVICES: ""
+      INPUT_CSV: "${INPUT_CSV:-}"
+      CHECKPOINT: "${CHECKPOINT:-}"
+      OUTPUT_CSV: "${OUTPUT_CSV:-}"
+      BATCH_SIZE: "${BATCH_SIZE:-32}"
+      USE_BBOX_CROP: "${USE_BBOX_CROP:-}"
+      MARGIN: "${MARGIN:-0.0}"
+    command:
+      - bash
+      - -lc
+      - >
+        python -u predict_checkpoint_csv.py
+        "$${INPUT_CSV}"
+        --checkpoint "$${CHECKPOINT}"
+        --output-csv "$${OUTPUT_CSV}"
+        --batch-size "$${BATCH_SIZE:-32}"
+        $([ "$${USE_BBOX_CROP}" = "1" ] && echo "--use-bbox-crop")
+        $${MARGIN:+--margin "$${MARGIN}"}
+
+  liveness-export-onnx:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+      args:
+        TENSORFLOW_IMAGE: tensorflow/tensorflow:2.21.0-gpu-jupyter
+    container_name: liveness-export-onnx
+    working_dir: /mnt/userefs/aleksandr_khaimin/Work/liveness
+    volumes:
+      - .:/mnt/userefs/aleksandr_khaimin/Work/liveness
+      - /mnt/userefs/aleksandr_khaimin/Work:/mnt/userefs/aleksandr_khaimin/Work
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CUDA_VISIBLE_DEVICES: ""
+      CHECKPOINT: "${CHECKPOINT:-}"
+      OUTPUT_ONNX: "${OUTPUT_ONNX:-model.onnx}"
+      OPSET: "${OPSET:-17}"
+    command:
+      - bash
+      - -lc
+      - >
+        pip install -q tf2onnx &&
+        python -m tf2onnx.convert
+        --saved_model "$${CHECKPOINT}"
+        --output "$${OUTPUT_ONNX}"
+        --opset "$${OPSET:-17}"

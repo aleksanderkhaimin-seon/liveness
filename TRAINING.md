@@ -31,17 +31,71 @@ Or from VS Code Dev Containers, open a terminal inside the container and run:
 python train_efficientnet_b2.py --csv test_df.csv --epochs 10 --batch-size 16
 ```
 
+## Run With Docker Logs
+
+If training is started with `docker compose exec`, its output is attached to that exec session and may not appear in `docker logs`. To make Docker capture training logs, run the dedicated training service:
+
+```bash
+TRAIN_CSV=train_df.csv \
+VALIDATION_CSV=validation_df.csv \
+TEST_CSV=extra_test_df.csv \
+OUTPUT_DIR=runs/efficientnet_b2_35ep \
+EPOCHS=35 \
+BATCH_SIZE=32 \
+COSINE_DECAY=1 \
+MIN_LEARNING_RATE=1e-7 \
+USE_BBOX_CROP=1 \
+MARGIN=5 \
+MIXED_PRECISION=1 \
+REQUIRE_GPU=1 \
+docker compose up liveness-train
+```
+
+Follow logs from another terminal:
+
+```bash
+docker compose logs -f liveness-train
+```
+
+The same output is also saved to:
+
+```text
+runs/logs/training.log
+```
+
 ## Useful Options
 
 ```bash
 python train_efficientnet_b2.py \
   --csv test_df.csv \
+  --validation-csv validation_df.csv \
+  --test-csv extra_test_df.csv \
   --output-dir runs/efficientnet_b2 \
   --epochs 20 \
   --batch-size 16 \
   --learning-rate 0.0001 \
+  --cosine-decay \
+  --min-learning-rate 0.000001 \
+  --use-bbox-crop \
+  --margin 5 \
   --validation-split 0.2
 ```
+
+`--csv` is used for training data. If `--validation-csv` is omitted, validation is split from `--csv`. `--test-csv` is optional and is used only for final testing, prediction export, and EER metrics.
+
+At the end of every epoch, validation EER metrics are computed and logged:
+
+- `val_bpcer`
+- `val_apcer`
+- `val_acer`
+- `val_eer`
+- `val_eer_threshold`
+
+These appear in `history.csv` and TensorBoard.
+
+With `--cosine-decay`, the optimizer uses cosine decay from `--learning-rate` down to `--min-learning-rate` across the requested number of epochs. The effective `learning_rate` is logged at the end of each epoch to `history.csv` and TensorBoard.
+
+With `--use-bbox-crop`, CSV files must include a `bbox` column formatted like `[x1,y1,x2,y2]`. Cropping is applied before resize for train, validation, and test datasets. `--margin 5` expands the crop by 5% of bbox width/height on every side; `--margin -5` crops 5% inside the bbox.
 
 Fine-tune the EfficientNetB2 backbone immediately:
 
@@ -73,6 +127,14 @@ The script writes:
 - `runs/efficientnet_b2/tensorboard/`
 
 `test_predictions.csv` contains both the raw linear `logit` and sigmoid `score`.
+
+`report.json` contains `test_metrics` plus `test_eer_metrics`:
+
+- `bpcer`
+- `apcer`
+- `acer`
+- `eer`
+- `eer_threshold`
 
 ## Convert Checkpoint To ONNX
 
@@ -112,4 +174,82 @@ Then open:
 
 ```text
 http://localhost:6006
+```
+
+## Evaluate S3 CSV
+
+For a CSV with `path,label` where `path` may be `s3://bucket/key`, sync images into the container cache and evaluate a saved checkpoint:
+
+```bash
+python eval_s3_dataframe.py data/s3_test.csv \
+  --checkpoint runs/efficientnet_b2/best.keras \
+  --output-dir runs/s3_eval \
+  --batch-size 32 \
+  --require-gpu
+```
+
+The script copies missing `s3://...` files into:
+
+```text
+/mnt/userefs/aleksandr_khaimin/Work/liveness/s3_cache
+```
+
+If many rows share a prefix, sync that prefix first:
+
+```bash
+python eval_s3_dataframe.py data/s3_test.csv \
+  --checkpoint runs/efficientnet_b2/best.keras \
+  --sync-prefix s3://bucket/dataset/prefix \
+  --output-dir runs/s3_eval
+```
+
+Preview AWS commands without downloading:
+
+```bash
+python eval_s3_dataframe.py data/s3_test.csv \
+  --checkpoint runs/efficientnet_b2/best.keras \
+  --dry-run
+```
+
+With bbox crop:
+
+```bash
+python eval_s3_dataframe.py data/s3_test.csv \
+  --checkpoint runs/efficientnet_b2/best.keras \
+  --use-bbox-crop \
+  --margin 5
+```
+
+Outputs:
+
+- `runs/s3_eval/predictions.csv`
+- `runs/s3_eval/report.json`
+
+## Predict CSV With Checkpoint
+
+For a local CSV in the same `path,label` format used for training:
+
+```bash
+python predict_checkpoint_csv.py data/test.csv \
+  --checkpoint runs/efficientnet_b2/best.keras \
+  --output-csv runs/predictions.csv \
+  --batch-size 32
+```
+
+Missing files are skipped by default. Use `--on-missing raise` to fail instead.
+
+The output CSV contains exactly:
+
+```csv
+path,label,score
+```
+
+With bbox crop:
+
+```bash
+python predict_checkpoint_csv.py data/test.csv \
+  --checkpoint runs/efficientnet_b2/best.keras \
+  --output-csv runs/predictions.csv \
+  --use-bbox-crop \
+  --margin 5
 ```

@@ -155,9 +155,7 @@ def load_checkpoint_model(checkpoint_path: Path):
 def export_saved_model(checkpoint_path: Path, export_dir: Path) -> None:
     import tensorflow as tf
 
-    checkpoint_model = load_checkpoint_model(checkpoint_path)
-    model = build_inference_model()
-    copy_matching_weights(checkpoint_model, model)
+    model = load_checkpoint_model(checkpoint_path)
 
     input_signature = [
         tf.TensorSpec(

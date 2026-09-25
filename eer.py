@@ -1,8 +1,7 @@
 import numpy as np
-from fire import Fire
 
 def get_fr_at_threshold(tar, threshold=0.5):
-    fr = np.NaN
+    fr = np.nan
     if len(tar) > 0:
         fr = len(np.where(tar < threshold)[0])
         fr = fr * 100.0 / len(tar)
@@ -11,7 +10,7 @@ def get_fr_at_threshold(tar, threshold=0.5):
 
 
 def get_fa_at_threshold(imp, threshold=0.5):
-    fa = np.NaN
+    fa = np.nan
     if len(imp) > 0:
         fa = len(np.where(imp > threshold)[0])
         fa = fa * 100.0 / len(imp)
@@ -85,4 +84,6 @@ def main(th: float = 0.5):
     print(f'bpcer: {bpcer}, apcer: {apcer}, eer: {eer} at threshold: {th}')
 
 if __name__ == "__main__":
+    from fire import Fire
+
     Fire(main)

@@ -328,7 +328,7 @@ def build_hyperparameters(
         "use_bbox_crop": args.use_bbox_crop,
         "margin": args.margin,
         "bbox_aug_prob": args.bbox_aug_prob,
-        "degrade": args.degrade,
+        "degrade": getattr(args, "degrade", None),
         "comment": args.comment,
     }
     for key, value in cli_overrides.items():

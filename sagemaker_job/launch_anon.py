@@ -150,9 +150,13 @@ def build_hyperparameters(config: dict, args: argparse.Namespace, prefixes: list
     args.use_bbox_crop = False
     args.bbox_aug_prob = 0.0
     args.margin = None
+    args.degrade = None
     hyperparameters = train_launch.build_hyperparameters(config, args, prefixes, prod_prefixes)
     hyperparameters["use_bbox_crop"] = "false"
     hyperparameters["bbox_aug_prob"] = "0"
+    # Patches carry no bbox, so bbox-based degradations cannot apply; the patch
+    # sampling is the anonymisation here. Drop any degrade key from the config.
+    hyperparameters.pop("degrade", None)
     hyperparameters["anonymize_eval"] = "true" if args.anonymize_eval else "false"
     hyperparameters["patch_size"] = train_launch.stringify(args.patch_size)
     hyperparameters["patches_per_image"] = train_launch.stringify(args.patches_per_image)

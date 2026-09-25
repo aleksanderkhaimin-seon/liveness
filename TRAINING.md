@@ -189,7 +189,7 @@ python train_efficientnet_b2.py --csv test_df.csv --train-backbone
 python train_efficientnet_b2.py --csv train.csv --degrade mask:0.05
 python train_efficientnet_b2.py --csv train.csv --degrade mask:0.05,downscale:192
 DEGRADE=mask:0.05 docker compose up liveness-train
-python training_job.py --csv ... --degrade mask:0.05
+python sagemaker_job/launch.py --config configs/train-gpu.json --degrade mask:0.05
 ```
 
 | spec | effect | needs bbox |

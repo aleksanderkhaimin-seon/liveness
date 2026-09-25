@@ -3,7 +3,6 @@ import argparse
 import csv
 import json
 import math
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -56,40 +55,6 @@ def configure_runtime(require_gpu: bool, mixed_precision: bool) -> None:
         print("Mixed precision: enabled")
 
 
-def str2bool(value: str) -> bool:
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "y", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "n", "off", ""}:
-        return False
-    raise argparse.ArgumentTypeError(f"Expected a boolean value, got {value!r}")
-
-
-def parse_path_remaps(values: list[str]) -> list[tuple[str, str]]:
-    remaps = []
-    for value in values:
-        for item in value.split(","):
-            item = item.strip()
-            if not item:
-                continue
-            if "=" not in item:
-                raise argparse.ArgumentTypeError(f"--path-remap expects OLD=NEW, got {item!r}")
-            old, new = item.split("=", 1)
-            if not old or not new:
-                raise argparse.ArgumentTypeError(f"--path-remap expects OLD=NEW, got {item!r}")
-            remaps.append((old.rstrip("/"), new.rstrip("/")))
-    return remaps
-
-
-def apply_path_remap(raw_path: str, path_remaps: list[tuple[str, str]]) -> str:
-    for old, new in path_remaps:
-        if raw_path == old:
-            return new
-        if raw_path.startswith(old + "/"):
-            return new + raw_path[len(old):]
-    return raw_path
-
-
 def normalize_bbox_value(raw_bbox: str, csv_path: Path, row_number: int, require_bbox: bool) -> str:
     bbox = raw_bbox.strip()
     if bbox.lower() in {"", "none", "null", "nan"}:
@@ -118,11 +83,7 @@ def normalize_bbox_value(raw_bbox: str, csv_path: Path, row_number: int, require
     return json.dumps([x1, y1, x2, y2], separators=(",", ":"))
 
 
-def read_csv_dataset(
-    csv_path: Path,
-    require_bbox: bool = False,
-    path_remaps: list[tuple[str, str]] | None = None,
-) -> tuple[list[str], list[int], list[str]]:
+def read_csv_dataset(csv_path: Path, require_bbox: bool = False) -> tuple[list[str], list[int], list[str]]:
     if not csv_path.exists():
         raise FileNotFoundError(
             f"CSV file not found: {csv_path}. Expected columns: path,label"
@@ -144,9 +105,6 @@ def read_csv_dataset(
             raw_label = row["label"].strip()
             if not raw_path:
                 raise ValueError(f"Empty image path at row {row_number}")
-
-            if path_remaps:
-                raw_path = apply_path_remap(raw_path, path_remaps)
 
             image_path = Path(raw_path)
             if not image_path.is_absolute():
@@ -659,56 +617,145 @@ def write_predictions(
     return logits, scores
 
 
+PATH_KEYS = ("csv", "validation_csv", "test_csv", "output_dir")
+BOOL_KEYS = (
+    "cosine_decay",
+    "train_backbone",
+    "require_gpu",
+    "mixed_precision",
+    "use_bbox_crop",
+)
+CONFIG_DEFAULTS = {
+    "csv": Path("test_df.csv"),
+    "validation_csv": None,
+    "test_csv": None,
+    "output_dir": Path("runs/efficientnet_b2"),
+    "epochs": 12,
+    "batch_size": 32,
+    "learning_rate": 1e-5,
+    "cosine_decay": False,
+    "min_learning_rate": 0.0,
+    "validation_split": 0.1,
+    "seed": 42,
+    "train_backbone": False,
+    "require_gpu": False,
+    "mixed_precision": False,
+    "eer_threshold": 0.5,
+    "use_bbox_crop": False,
+    "margin": 0.0,
+    "bbox_aug_prob": 0.0,
+    "degrade": "",
+    "comment": "",
+}
+
+
+def _normalize_config_key(key: str) -> str:
+    return key.strip().replace("-", "_")
+
+
+def load_config_file(path: Path) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    if suffix in {".yaml", ".yml"}:
+        try:
+            import yaml
+        except ImportError as error:
+            raise RuntimeError("PyYAML is required for .yaml/.yml configs") from error
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Config must be a JSON/YAML object, got {type(data).__name__}")
+
+    unknown = []
+    parsed = {}
+    for raw_key, value in data.items():
+        key = _normalize_config_key(str(raw_key))
+        if key in {"config"}:
+            continue
+        if key not in CONFIG_DEFAULTS:
+            unknown.append(raw_key)
+            continue
+        if key in PATH_KEYS:
+            parsed[key] = None if value in (None, "") else Path(value)
+        else:
+            parsed[key] = value
+
+    if unknown:
+        raise ValueError(f"Unknown config keys: {unknown}. Allowed: {sorted(CONFIG_DEFAULTS)}")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train EfficientNetB2 for binary liveness classification.")
-    parser.add_argument("--csv", type=Path, default=Path("test_df.csv"), help="CSV with path,label columns.")
+    parser = argparse.ArgumentParser(
+        description="Train EfficientNetB2 for binary liveness classification. Prefer --config; CLI flags override the file.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="JSON or YAML file with training settings. CLI flags override the file.",
+    )
+    parser.add_argument("--csv", type=Path, help="CSV with path,label columns.")
     parser.add_argument("--validation-csv", type=Path, help="Optional fixed validation CSV. If omitted, validation is split from --csv.")
     parser.add_argument("--test-csv", type=Path, help="Optional extra CSV used only for final testing and EER.")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path(os.environ.get("SM_OUTPUT_DATA_DIR", "runs")) / "efficientnet_b2",
-        help="Where to save model and reports.",
-    )
-    parser.add_argument("--epochs", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--learning-rate", type=float, default=1e-5)
-    parser.add_argument("--cosine-decay", type=str2bool, nargs="?", const=True, default=False, help="Use cosine decay from --learning-rate to --min-learning-rate.")
-    parser.add_argument("--min-learning-rate", type=float, default=0.0, help="Final LR floor for cosine decay.")
-    parser.add_argument("--validation-split", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--train-backbone", type=str2bool, nargs="?", const=True, default=False, help="Fine-tune EfficientNetB2 from the first epoch.")
-    parser.add_argument("--require-gpu", type=str2bool, nargs="?", const=True, default=False, help="Fail if TensorFlow cannot see a GPU.")
-    parser.add_argument("--mixed-precision", type=str2bool, nargs="?", const=True, default=False, help="Use mixed precision, useful on NVIDIA T4.")
-    parser.add_argument("--eer-threshold", type=float, default=0.5, help="Threshold for BPCER/APCER/ACER on sigmoid scores.")
-    parser.add_argument("--use-bbox-crop", type=str2bool, nargs="?", const=True, default=False, help="Crop images by CSV bbox column before resizing.")
-    parser.add_argument("--margin", type=float, default=0.0, help="BBox crop margin percent. 5 expands by 5%%, -5 crops 5%% inside.")
-    parser.add_argument("--bbox-aug-prob", type=float, default=0.0, help="Probability of applying bbox crop as augmentation during training (0.0 to disable).")
+    parser.add_argument("--output-dir", type=Path, help="Where to save model and reports.")
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--cosine-decay", action=argparse.BooleanOptionalAction, default=None, help="Use cosine decay from --learning-rate to --min-learning-rate.")
+    parser.add_argument("--min-learning-rate", type=float, help="Final LR floor for cosine decay.")
+    parser.add_argument("--validation-split", type=float)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--train-backbone", action=argparse.BooleanOptionalAction, default=None, help="Fine-tune EfficientNetB2 from the first epoch.")
+    parser.add_argument("--require-gpu", action=argparse.BooleanOptionalAction, default=None, help="Fail if TensorFlow cannot see a GPU.")
+    parser.add_argument("--mixed-precision", action=argparse.BooleanOptionalAction, default=None, help="Use mixed precision, useful on NVIDIA T4.")
+    parser.add_argument("--eer-threshold", type=float, help="Threshold for BPCER/APCER/ACER on sigmoid scores.")
+    parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=None, help="Crop images by CSV bbox column before resizing.")
+    parser.add_argument("--margin", type=float, help="BBox crop margin percent. 5 expands by 5%%, -5 crops 5%% inside.")
+    parser.add_argument("--bbox-aug-prob", type=float, help="Probability of applying bbox crop as augmentation during training (0.0 to disable).")
     parser.add_argument(
         "--degrade",
         type=str,
-        default="",
         help="Comma-separated anonymisation degradations applied to every split before crop/resize: "
         "mask:BAND (fill document interior, keep BAND x bbox border), pixelate:N (document short side "
         "to N px and back), downscale:N (frame long side to N px and back). E.g. mask:0.05,downscale:192",
     )
-    parser.add_argument("--comment", type=str, default="", help="Free-text note saved to report.json.")
-    parser.add_argument(
-        "--path-remap",
-        action="append",
-        default=[],
-        metavar="OLD=NEW[,OLD=NEW]",
-        help="Rewrite the CSV path column prefix, e.g. /mnt/dataefs=/opt/ml/input/data/efs. Repeatable or comma separated.",
-    )
-    parser.add_argument(
-        "--export-model-dir",
-        type=Path,
-        default=Path(os.environ["SM_MODEL_DIR"]) if "SM_MODEL_DIR" in os.environ else None,
-        help="Copy best.keras and report.json here after training (SageMaker model artifact dir).",
-    )
+    parser.add_argument("--comment", type=str, help="Free-text note saved to report.json.")
     args = parser.parse_args()
-    args.path_remap = parse_path_remaps(args.path_remap)
-    return args
+
+    merged = dict(CONFIG_DEFAULTS)
+    if args.config is not None:
+        merged.update(load_config_file(args.config))
+
+    for key in CONFIG_DEFAULTS:
+        cli_value = getattr(args, key)
+        if cli_value is not None:
+            merged[key] = cli_value
+
+    for key in BOOL_KEYS:
+        merged[key] = bool(merged[key])
+
+    resolved = argparse.Namespace(**merged, config=args.config)
+    print("Resolved training config:")
+    print(json.dumps(config_as_dict(resolved), indent=2))
+    return resolved
+
+
+def config_as_dict(args: argparse.Namespace) -> dict:
+    payload = {}
+    for key in CONFIG_DEFAULTS:
+        value = getattr(args, key)
+        if isinstance(value, Path):
+            payload[key] = str(value)
+        else:
+            payload[key] = value
+    if args.config is not None:
+        payload["config"] = str(args.config)
+    return payload
 
 
 def main() -> None:
@@ -716,11 +763,8 @@ def main() -> None:
     tf.keras.utils.set_random_seed(args.seed)
     configure_runtime(args.require_gpu, args.mixed_precision)
 
-    if args.path_remap:
-        print("Path remap:", [f"{old} -> {new}" for old, new in args.path_remap])
-
     try:
-        DEGRADATIONS[:] = parse_degrade(args.degrade)
+        DEGRADATIONS[:] = parse_degrade(args.degrade or "")
     except ValueError as error:
         raise SystemExit(f"--degrade: {error}") from error
     if DEGRADATIONS:
@@ -741,11 +785,7 @@ def main() -> None:
                 f"{args.degrade!r} needs one for every row"
             )
 
-    paths, labels, bboxes = read_csv_dataset(
-        args.csv,
-        require_bbox=require_bbox,
-        path_remaps=args.path_remap,
-    )
+    paths, labels, bboxes = read_csv_dataset(args.csv, require_bbox=require_bbox)
     check_degrade_bboxes(args.csv, bboxes)
     if args.validation_csv:
         train_paths = paths
@@ -754,7 +794,6 @@ def main() -> None:
         validation_paths, validation_labels, validation_bboxes = read_csv_dataset(
             args.validation_csv,
             require_bbox=require_bbox,
-            path_remaps=args.path_remap,
         )
         check_degrade_bboxes(args.validation_csv, validation_bboxes)
         validation_csv = args.validation_csv
@@ -792,7 +831,6 @@ def main() -> None:
         test_paths, test_labels, test_bboxes = read_csv_dataset(
             args.test_csv,
             require_bbox=require_bbox,
-            path_remaps=args.path_remap,
         )
         check_degrade_bboxes(args.test_csv, test_bboxes)
         test_csv = args.test_csv
@@ -822,6 +860,10 @@ def main() -> None:
 
     model = build_model(learning_rate, args.train_backbone)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if args.config is not None:
+        shutil.copy2(args.config, args.output_dir / args.config.name)
+    with (args.output_dir / "train_config.json").open("w", encoding="utf-8") as file:
+        json.dump(config_as_dict(args), file, indent=2)
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -904,20 +946,13 @@ def main() -> None:
         },
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
         "comment": args.comment,
+        "config": config_as_dict(args),
         "test_metrics": metrics,
         "test_eer_metrics": eer_metrics,
         "history": history.history,
     }
     with (args.output_dir / "report.json").open("w", encoding="utf-8") as file:
         json.dump(report, file, indent=2)
-
-    if args.export_model_dir:
-        args.export_model_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("best.keras", "last.keras", "report.json"):
-            source = args.output_dir / name
-            if source.exists():
-                shutil.copy2(source, args.export_model_dir / name)
-        print(f"Exported model artifacts to {args.export_model_dir}")
 
     print(json.dumps({
         "output_dir": str(args.output_dir),

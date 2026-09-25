@@ -1,0 +1,21 @@
+{
+  "csv": "data/train_Seon-DocX-Opensource_exp_35_checked.csv",
+  "validation_csv": "data/ProdTest-0.3.csv",
+  "test_csv": "data/test_Pinterest_v_1_checked.csv",
+  "output_dir": "runs/efficientnet_b2_haia2/exp_2",
+  "epochs": 3,
+  "batch_size": 32,
+  "learning_rate": 1e-3,
+  "cosine_decay": true,
+  "min_learning_rate": 1e-7,
+  "validation_split": 0.1,
+  "seed": 42,
+  "train_backbone": false,
+  "require_gpu": false,
+  "mixed_precision": true,
+  "eer_threshold": 0.5,
+  "use_bbox_crop": false,
+  "margin": 5,
+  "bbox_aug_prob": 0.0,
+  "comment": "liveness-efficientnet-b2-20260917090120 Completed 13.669 3.007"
+}

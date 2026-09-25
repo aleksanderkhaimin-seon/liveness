@@ -10,6 +10,84 @@ relative/path/to/image_002.jpg,0
 
 Relative image paths are resolved relative to the CSV file location.
 
+## SageMaker Training Job
+
+`train_efficientnet_b2.py` is unchanged. SageMaker Jobs use `sagemaker_job/train.py` as the container entrypoint and `sagemaker_job/launch.py` to submit the job.
+
+Images are read from the Studio EFS data directory, which holds both `datalake/` and `processed_v3/`:
+
+```text
+/home/sagemaker-user/seon-data-efs/data
+```
+
+That directory is mounted read-only into the job at `/opt/ml/input/data/datalake`, and manifest paths are rewritten to it. All of these prefixes are recognized and map to the same files:
+
+```text
+/home/sagemaker-user/seon-data-efs/data
+/mnt/custom-file-systems/efs/fs-0773949cd1f9915ec/seon-data-efs/data
+/home/sagemaker-user/custom-file-systems/efs/fs-0773949cd1f9915ec/seon-data-efs/data
+/mnt/dataefs/data
+```
+
+The launcher samples each manifest before submitting and fails immediately if paths fall outside the mounted directory. The job runs in the Studio VPC so it can mount the filesystem. SageMaker still uploads source code and `model.tar.gz` to the default SageMaker S3 bucket; image files are never copied.
+
+The job uses this image:
+
+```text
+335010339905.dkr.ecr.eu-central-1.amazonaws.com/idv-ml/liveness-cuda@sha256:0bc45d1ed84f7492c3b563d562a154c5044a2eabad1d3c7642dfc6fb27446da7
+```
+
+```bash
+python sagemaker_job/launch.py \
+  --config configs/train.json \
+  --instance-type ml.g5.xlarge
+```
+
+Train, validation, and test CSVs are taken from the config file. That file is saved into the job output as it was submitted.
+
+VPC subnets and security groups are detected from this SageMaker domain. Override with `--subnets` and `--security-group-ids` if needed. The outbound NFS security group must be included so the training job can mount EFS.
+
+Checkpoints, `best.keras`, `history.csv`, and `report.json` are written to `/opt/ml/model` and uploaded as `model.tar.gz`.
+
+## SageMaker ONNX Evaluation Job
+
+SageMaker has no separate ONNX evaluation job type. Submit a Job with `sagemaker_job/launch_eval.py`; it uses the same image and EFS mounts as training, runs `predict_onnx_csv.py`, then writes EER metrics.
+
+From this Code Editor terminal (not the Jobs UI create form):
+
+```bash
+cd /home/sagemaker-user/seon-data-efs/users/aleksandr_khaimin/Work/Liveness/Liveness
+
+python sagemaker_job/launch_eval.py \
+  --csv data/ProdTest-0.2-val.csv \
+  --onnx path/to/model.onnx \
+  --instance-type ml.g4dn.xlarge
+```
+
+Several models at once:
+
+```bash
+python sagemaker_job/launch_eval.py \
+  --csv data/ProdTest-0.2-val.csv \
+  --onnx models/m4.onnx models/m5.onnx \
+  --no-wait
+```
+
+From a Keras checkpoint (converted in the job, then scored):
+
+```bash
+python sagemaker_job/launch_eval.py \
+  --csv data/ProdTest-0.2-val.csv \
+  --checkpoint runs/efficientnet_b2/best.keras
+```
+
+The job appears under **Jobs → Training** with a name like `liveness-onnx-eval-...`. When it succeeds, download the output `tar.gz` (or look under the job Output in S3) for:
+
+- `eval_report.json` (`bpcer`, `apcer`, `acer`, `eer`)
+- `<model>_predictions.csv` (`path,label,score`)
+
+ProdTest paths stay on the prod EFS mount; ONNX files are uploaded with the job source.
+
 ## Run In The Container
 
 Start the container:

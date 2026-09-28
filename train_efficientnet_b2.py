@@ -238,10 +238,13 @@ def crop_by_bbox(image: tf.Tensor, bbox: tf.Tensor, margin: float) -> tf.Tensor:
 #   pixelate:N       downsample the document interior so its short side is N px,
 #                    then bilinear-upsample back (text ~4% of N, face ~35% of N)
 #   downscale:N      downsample the whole frame to long side N px and back
+#   downscale_doc:N  downsample the whole frame so the DOCUMENT long side is N px,
+#                    and back -- a per-image legibility bound rather than a
+#                    population statistic (a close-up is scaled harder)
 #
 # Example: --degrade mask:0.05,downscale:192
 
-DEGRADE_KINDS = ("mask", "pixelate", "downscale")
+DEGRADE_KINDS = ("mask", "pixelate", "downscale", "downscale_doc")
 DEGRADATIONS: list[tuple[str, float]] = []
 
 
@@ -261,7 +264,7 @@ def parse_degrade(text: str) -> list[tuple[str, float]]:
             raise ValueError(f"Degradation {item!r} needs a numeric value, e.g. mask:0.05") from error
         if kind == "mask" and not 0.0 <= number < 0.5:
             raise ValueError(f"mask band must be in [0, 0.5), got {number}")
-        if kind in ("pixelate", "downscale") and number < 8:
+        if kind in ("pixelate", "downscale", "downscale_doc") and number < 8:
             raise ValueError(f"{kind} target must be at least 8 px, got {number}")
         specs.append((kind, number))
     return specs
@@ -341,6 +344,17 @@ def degrade_downscale(image: tf.Tensor, long_side: float) -> tf.Tensor:
     return tf.cond(factor < 1.0, apply, lambda: image)
 
 
+def degrade_downscale_doc(image: tf.Tensor, bbox: tf.Tensor, doc_long_side: float) -> tf.Tensor:
+    """Downscale the whole frame so the document's long side becomes doc_long_side px."""
+    x1, y1, x2, y2 = bbox_rect(image, bbox, 0.0)
+    doc_long = tf.cast(tf.maximum(x2 - x1, y2 - y1), tf.float32)
+    shape = tf.shape(image)
+    frame_long = tf.cast(tf.maximum(shape[0], shape[1]), tf.float32)
+    # Express the target as a frame long side so the frame-level helper does the work.
+    target_frame_long = frame_long * doc_long_side / tf.maximum(doc_long, 1.0)
+    return tf.cond(doc_long > doc_long_side, lambda: degrade_downscale(image, target_frame_long), lambda: image)
+
+
 def apply_degradations(image: tf.Tensor, bbox: tf.Tensor) -> tf.Tensor:
     if not DEGRADATIONS:
         return image
@@ -352,6 +366,8 @@ def apply_degradations(image: tf.Tensor, bbox: tf.Tensor) -> tf.Tensor:
             image = tf.cond(has_bbox, lambda img=image, v=value: degrade_pixelate(img, bbox, v), lambda img=image: img)
         elif kind == "downscale":
             image = degrade_downscale(image, value)
+        elif kind == "downscale_doc":
+            image = tf.cond(has_bbox, lambda img=image, v=value: degrade_downscale_doc(img, bbox, v), lambda img=image: img)
     return image
 
 
@@ -722,7 +738,8 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Comma-separated anonymisation degradations applied to every split before crop/resize: "
         "mask:BAND (fill document interior, keep BAND x bbox border), pixelate:N (document short side "
-        "to N px and back), downscale:N (frame long side to N px and back). E.g. mask:0.05,downscale:192",
+        "to N px and back), downscale:N (frame long side to N px and back), downscale_doc:N (frame scaled "
+        "so the document long side is N px, and back). E.g. mask:0.05,downscale:192",
     )
     parser.add_argument("--comment", type=str, help="Free-text note saved to report.json.")
     args = parser.parse_args()
@@ -769,7 +786,7 @@ def main() -> None:
         raise SystemExit(f"--degrade: {error}") from error
     if DEGRADATIONS:
         print("Degradations:", ", ".join(f"{kind}:{value:g}" for kind, value in DEGRADATIONS))
-    degrade_needs_bbox = any(kind in ("mask", "pixelate") for kind, _ in DEGRADATIONS)
+    degrade_needs_bbox = any(kind in ("mask", "pixelate", "downscale_doc") for kind, _ in DEGRADATIONS)
     require_bbox = args.use_bbox_crop or degrade_needs_bbox
 
     def check_degrade_bboxes(csv_path: Path, bbox_values: list[str]) -> None:

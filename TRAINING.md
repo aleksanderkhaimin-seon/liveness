@@ -197,6 +197,15 @@ python sagemaker_job/launch.py --config configs/train-gpu.json --degrade mask:0.
 | `mask:BAND` | fill the document interior with its per-channel mean, keeping a border band `BAND` × bbox size on each side (`0` fills the whole bbox) | yes |
 | `pixelate:N` | downsample the document interior so its short side is `N` px, then bilinear back; field text is ~4% of `N`, the face ~35% | yes |
 | `downscale:N` | downsample the whole frame to long side `N` px and back | no |
+| `downscale_doc:N` | downsample the whole frame so the *document* long side is `N` px, and back — a per-image legibility bound (`doc:96` ≈ `frame:192` for the median capture, harsher for close-ups) | yes |
+
+Results so far (`runs/train_reports`, 3 epochs, production validation = `ProdTest-0.3`): `downscale:192` matched the un-degraded baseline on both Pinterest test (3.0 vs 3.2% EER) and production (15.9 vs 15.0%); native-resolution patches reached 1.7% per document on Pinterest but 38% on production. Coarse cues transfer, fine texture does not.
+
+To materialise the low-resolution representation as files rather than a training-time flag, use `export_lowres_frames.py`; `--absolute-paths` is needed when the resulting `frames.csv` goes through `sagemaker_job/launch.py`:
+
+```bash
+python export_lowres_frames.py data/train.csv --out-dir /home/sagemaker-user/seon-data-efs/data/anon_lowres/train --mode doc --size 96 --absolute-paths --workers 16
+```
 
 Specs are comma-separated and applied left to right. `mask` and `pixelate` refuse to run if any row in any CSV lacks a bbox, because an untouched row would be un-anonymised. The applied list is recorded under `degrade` in `report.json`.
 

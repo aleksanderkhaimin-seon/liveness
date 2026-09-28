@@ -361,7 +361,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch liveness training as a SageMaker Training Job.")
     parser.add_argument("--image-uri", default=DEFAULT_IMAGE)
     parser.add_argument("--role", default=None, help="IAM role ARN. Defaults to the current SageMaker execution role.")
-    parser.add_argument("--instance-type", default="ml.g5.xlarge")
+    parser.add_argument("--instance-type", default="ml.g6.xlarge")
     parser.add_argument("--instance-count", type=int, default=1)
     parser.add_argument("--volume-size", type=int, default=50, help="EBS volume size in GB for code and checkpoints.")
     parser.add_argument("--max-run", type=int, default=86400, help="Max runtime in seconds.")

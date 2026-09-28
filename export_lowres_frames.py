@@ -214,6 +214,12 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Compute ids, scales and legibility without writing images.")
     parser.add_argument("--allow-single-class", action="store_true")
     parser.add_argument(
+        "--csv-name",
+        default="frames.csv",
+        help="Name of the output CSV. Give train/validation/test distinct names: sagemaker_job/launch.py "
+        "stages every config CSV as data/<basename>, so three files called frames.csv overwrite each other.",
+    )
+    parser.add_argument(
         "--absolute-paths",
         action="store_true",
         help="Write absolute image paths into frames.csv (resolved against --out-dir). Required for "
@@ -270,7 +276,7 @@ def main() -> None:
     }
 
     if not cfg.dry_run:
-        with (args.out_dir / "frames.csv").open("w", encoding="utf-8", newline="") as file:
+        with (args.out_dir / args.csv_name).open("w", encoding="utf-8", newline="") as file:
             writer = csv.writer(file)
             writer.writerow(["path", "label", "bbox"])
             root = args.out_dir.resolve()
@@ -291,7 +297,7 @@ def main() -> None:
         for e in errors[:10]:
             print(f"  {e}", file=sys.stderr)
     if not cfg.dry_run:
-        print(f"\nSafe to move : {args.out_dir / 'frames.csv'} + frames/")
+        print(f"\nSafe to move : {args.out_dir / args.csv_name} + frames/")
         print(f"KEEP BEHIND  : {args.out_dir / 'manifest.csv'}")
     if problems:
         print("\nPROBLEMS:", file=sys.stderr)

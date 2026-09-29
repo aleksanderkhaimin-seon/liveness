@@ -1,6 +1,6 @@
 # Anonymised training data for document liveness — evidence for review
 
-*Prepared 2026-09-29 for DPO / legal review. Research project, no model deployed. All numbers trace to files under `runs/train_reports/` and to commits on `main`.*
+*Prepared 2026-09-29, updated with the Sept-29 runs, for DPO / legal review. Research project, no model deployed. All numbers trace to files under `runs/train_reports/` and to commits on `main`.*
 
 ## 1. What is being asked
 
@@ -36,10 +36,12 @@ The model is judged on **production validation data** (`ProdTest-0.3`: 3,739 fra
 | full frame, unmodified (baseline) | 3.24 | **14.95** |
 | full frame downscaled to 192 px long side (`downscale:192`) | 3.01 | **15.88** |
 | full frame, document long side → 96 px (`downscale_doc:96`) | 8.09 | **16.20** |
-| baseline, 10 epochs, seeds 42 / 7 | 6.23 / 3.01 | 13.67 / 12.17 |
-| `downscale:192`, 10 epochs, seeds 42 / 7 | 3.24 / 7.40 | 14.25 / 14.38 |
+| **exported `doc:96` files** (the artefact itself, no training-time transform) | 9.93 | **15.41** |
+| baseline, 10 epochs, seeds 42 / 7 | 6.23 / 3.01 | 13.67 / 12.17 (mean 12.9) |
+| `downscale:192`, 10 epochs, seeds 42 / 7 | 3.24 / 7.40 | 14.25 / 14.38 (mean 14.3) |
+| **`downscale_doc:96`, 10 epochs, seeds 42 / 7** | 3.01 / 3.93 | **12.08 / 14.25 (mean 13.2)** |
 
-Seed-to-seed spread with identical configuration is 3–4 points on the test set and about 2 on production, so single-run differences smaller than that are noise. On production, the low-resolution representation costs **0–3 points** relative to the unmodified frames. Every other anonymisation candidate cost more:
+Seed-to-seed spread with identical configuration is 3–4 points on the test set and about 2 on production, so single-run differences smaller than that are noise. On production, the document-relative low-resolution representation is **within seed noise of the unmodified frames** (13.2 vs 12.9, mean of two seeds; the frame-relative variant is ~1.4 points behind). Training on the exported files reproduces the training-time transform (15.41 vs 16.20 at three epochs, same seed), so the artefact and the experiment are the same thing. Every other anonymisation candidate cost more:
 
 | alternative | production EER |
 |---|---|
@@ -88,4 +90,4 @@ At 96 px the frame still conveys: document type and layout, dominant colours, th
 
 ## 8. Reproducibility
 
-Repository `main` (GitHub `aleksanderkhaimin-seon/liveness`): training-time transforms `--degrade` in `train_efficientnet_b2.py` (commit `5cbbb2c`, `7e0bb85`); export `export_lowres_frames.py` (`7e0bb85`, `662a5ad`); legibility proxy `legibility_proxy.py` (`880fb3f`); patch experiment `sample_document_patches.py`, `aggregate_patch_eer.py` (`9211171`, `224e2a5`). Run reports: `runs/train_reports/report-*.json`, `runs/train_reports/Sept-28/`, export summaries `runs/train_reports/Sept-28/summary-{train,val,test}.json`.
+Repository `main` (GitHub `aleksanderkhaimin-seon/liveness`): training-time transforms `--degrade` in `train_efficientnet_b2.py` (commit `5cbbb2c`, `7e0bb85`); export `export_lowres_frames.py` (`7e0bb85`, `662a5ad`); legibility proxy `legibility_proxy.py` (`880fb3f`); patch experiment `sample_document_patches.py`, `aggregate_patch_eer.py` (`9211171`, `224e2a5`). Run reports: `runs/train_reports/report-*.json`, `runs/train_reports/Sept-28/`, `runs/train_reports/Sept-29/` (export confirmation, `downscale_doc:96` seeds), export summaries `runs/train_reports/Sept-28/summary-{train,val,test}.json`.

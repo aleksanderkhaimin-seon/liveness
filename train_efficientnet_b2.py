@@ -661,8 +661,10 @@ CONFIG_DEFAULTS = {
     "margin": 0.0,
     "bbox_aug_prob": 0.0,
     "degrade": "",
+    "checkpoint_monitor": "val_eer",
     "comment": "",
 }
+CHECKPOINT_MODES = {"val_eer": "min", "val_auc": "max", "val_loss": "min", "val_acer": "min"}
 
 
 def _normalize_config_key(key: str) -> str:
@@ -741,6 +743,13 @@ def parse_args() -> argparse.Namespace:
         "to N px and back), downscale:N (frame long side to N px and back), downscale_doc:N (frame scaled "
         "so the document long side is N px, and back). E.g. mask:0.05,downscale:192",
     )
+    parser.add_argument(
+        "--checkpoint-monitor",
+        type=str,
+        choices=sorted(CHECKPOINT_MODES),
+        help="Validation metric that selects best.keras. Default val_eer: validation is production "
+        "data and EER is the metric acted on; val_auc peaked at epoch 0 in most runs while EER did not.",
+    )
     parser.add_argument("--comment", type=str, help="Free-text note saved to report.json.")
     args = parser.parse_args()
 
@@ -773,6 +782,56 @@ def config_as_dict(args: argparse.Namespace) -> dict:
     if args.config is not None:
         payload["config"] = str(args.config)
     return payload
+
+
+def build_callbacks(args: argparse.Namespace, validation_paths: list[str], validation_labels: list[int],
+                    validation_bboxes: list[str]) -> list[tf.keras.callbacks.Callback]:
+    """EERCallback must run before the checkpoints: it writes val_eer into `logs`,
+    and ModelCheckpoint reads the monitor from the same dict in the same epoch."""
+    monitor = args.checkpoint_monitor
+    mode = CHECKPOINT_MODES[monitor]
+    return [
+        EERCallback(
+            paths=validation_paths,
+            labels=validation_labels,
+            bboxes=validation_bboxes,
+            batch_size=args.batch_size,
+            threshold=args.eer_threshold,
+            use_bbox_crop=args.use_bbox_crop,
+            margin=args.margin,
+            prefix="val",
+        ),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=str(args.output_dir / "best.keras"),
+            monitor=monitor,
+            mode=mode,
+            save_best_only=True,
+        ),
+        tf.keras.callbacks.ModelCheckpoint(
+            filepath=str(args.output_dir / "checkpoints" / f"epoch_{{epoch:03d}}_{monitor}_{{{monitor}:.4f}}.keras"),
+            monitor=monitor,
+            mode=mode,
+            save_best_only=False,
+        ),
+        LearningRateLogger(),
+        tf.keras.callbacks.TensorBoard(
+            log_dir=str(args.output_dir / "tensorboard"),
+            histogram_freq=1,
+            write_graph=True,
+            update_freq="epoch",
+        ),
+        tf.keras.callbacks.CSVLogger(str(args.output_dir / "history.csv")),
+    ]
+
+
+def best_epoch(history: dict, monitor: str) -> int | None:
+    values = history.get(monitor)
+    if not values:
+        return None
+    clean = [(v, i) for i, v in enumerate(values) if v == v]  # drop NaN
+    if not clean:
+        return None
+    return (min if CHECKPOINT_MODES[monitor] == "min" else max)(clean)[1]
 
 
 def main() -> None:
@@ -882,38 +941,7 @@ def main() -> None:
     with (args.output_dir / "train_config.json").open("w", encoding="utf-8") as file:
         json.dump(config_as_dict(args), file, indent=2)
 
-    callbacks = [
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=str(args.output_dir / "best.keras"),
-            monitor="val_auc",
-            mode="max",
-            save_best_only=True,
-        ),
-        tf.keras.callbacks.ModelCheckpoint(
-            filepath=str(args.output_dir / "checkpoints" / "epoch_{epoch:03d}_val_auc_{val_auc:.4f}.keras"),
-            monitor="val_auc",
-            mode="max",
-            save_best_only=False,
-        ),
-        EERCallback(
-            paths=validation_paths,
-            labels=validation_labels,
-            bboxes=validation_bboxes,
-            batch_size=args.batch_size,
-            threshold=args.eer_threshold,
-            use_bbox_crop=args.use_bbox_crop,
-            margin=args.margin,
-            prefix="val",
-        ),
-        LearningRateLogger(),
-        tf.keras.callbacks.TensorBoard(
-            log_dir=str(args.output_dir / "tensorboard"),
-            histogram_freq=1,
-            write_graph=True,
-            update_freq="epoch",
-        ),
-        tf.keras.callbacks.CSVLogger(str(args.output_dir / "history.csv")),
-    ]
+    callbacks = build_callbacks(args, validation_paths, validation_labels, validation_bboxes)
 
     print(f"Starting training for requested epochs: {args.epochs}")
     history = model.fit(
@@ -962,6 +990,11 @@ def main() -> None:
             "aug_prob": args.bbox_aug_prob,
         },
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
+        "checkpoint": {
+            "monitor": args.checkpoint_monitor,
+            "mode": CHECKPOINT_MODES[args.checkpoint_monitor],
+            "best_epoch": best_epoch(history.history, args.checkpoint_monitor),
+        },
         "comment": args.comment,
         "config": config_as_dict(args),
         "test_metrics": metrics,

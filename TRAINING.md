@@ -171,6 +171,8 @@ At the end of every epoch, validation EER metrics are computed and logged:
 
 These appear in `history.csv` and TensorBoard.
 
+`best.keras` (and therefore the test metrics, which are computed from it) is selected on `val_eer` (lower is better). `--checkpoint-monitor val_auc` restores the previous behaviour; `report.json` records the monitor and the selected epoch under `checkpoint`. Validation is production data and EER is the metric acted on; in the September 2026 runs `val_auc` peaked at epoch 0 while `val_eer` often did not, so the two monitors select different models.
+
 With `--cosine-decay`, the optimizer uses cosine decay from `--learning-rate` down to `--min-learning-rate` across the requested number of epochs. The effective `learning_rate` is logged at the end of each epoch to `history.csv` and TensorBoard.
 
 With `--use-bbox-crop`, CSV files must include a `bbox` column formatted like `[x1,y1,x2,y2]`. Cropping is applied before resize for train, validation, and test datasets. `--margin 5` expands the crop by 5% of bbox width/height on every side; `--margin -5` crops 5% inside the bbox.

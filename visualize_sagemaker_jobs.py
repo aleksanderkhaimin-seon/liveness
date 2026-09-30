@@ -106,6 +106,8 @@ def _keep_tar_member(relative: Path) -> bool:
         return True
     if name in KEEP_FROM_TAR or relative.suffix == ".json":
         return True
+    if name.endswith("_predictions.csv"):
+        return True
     return False
 
 

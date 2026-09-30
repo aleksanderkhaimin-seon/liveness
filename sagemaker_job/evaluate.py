@@ -288,6 +288,9 @@ def main() -> None:
             command.append("--use-bbox-crop")
         print("Running:", " ".join(command))
         subprocess.run(command, check=True)
+        model_scores = MODEL_DIR / pred_csv.name
+        shutil.copy2(pred_csv, model_scores)
+        print(f"Saved scores to {pred_csv} and {model_scores}")
         labels, scores = read_scores(pred_csv)
         metrics = eer_metrics(labels, scores, threshold)
         entry = {

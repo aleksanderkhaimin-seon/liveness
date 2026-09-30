@@ -4,7 +4,8 @@
 SageMaker has no separate ONNX eval job type. This reuses the same custom
 image and EFS mounts as training, with sagemaker_job/evaluate.py as the
 entrypoint. Results land in the job output S3 prefix as eval_report.json
-and <model>_predictions.csv.
+and <model>_predictions.csv (path,label,score). The same score CSV is copied
+into the model artifact so it is inside model.tar.gz as well as output.tar.gz.
 """
 from __future__ import annotations
 

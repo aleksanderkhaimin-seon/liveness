@@ -10,12 +10,14 @@ from pathlib import Path
 
 import onnx
 
+import train_efficientnet_b2 as teb
+from input_geometry import find_report, preprocessor_steps, resolve_geometry
 from train_efficientnet_b2 import build_model
 
 
 DEFAULT_INPUT_NAME = "x"
 DEFAULT_OUTPUT_NAME = "Identity"
-IMAGE_SIZE = 512
+IMAGE_SIZE = 512  # default only; the checkpoint's input shape is authoritative
 
 
 def iter_layers(model):
@@ -25,14 +27,14 @@ def iter_layers(model):
             yield from iter_layers(layer)
 
 
-def build_inference_model():
+def build_inference_model(image_size: int = IMAGE_SIZE):
     import tensorflow as tf
 
-    inputs = tf.keras.Input(shape=(IMAGE_SIZE, IMAGE_SIZE, 3), name=DEFAULT_INPUT_NAME)
+    inputs = tf.keras.Input(shape=(image_size, image_size, 3), name=DEFAULT_INPUT_NAME)
     backbone = tf.keras.applications.EfficientNetB2(
         include_top=False,
         weights=None,
-        input_shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
+        input_shape=(image_size, image_size, 3),
         pooling="avg",
     )
     x = backbone(inputs, training=False)
@@ -72,10 +74,10 @@ def copy_matching_weights(source_model, target_model) -> None:
     print(f"Copied weights for {len(copied)} weighted layers into inference model.", file=sys.stderr)
 
 
-def build_legacy_training_model():
+def build_legacy_training_model(image_size: int = IMAGE_SIZE):
     import tensorflow as tf
 
-    inputs = tf.keras.Input(shape=(IMAGE_SIZE, IMAGE_SIZE, 3))
+    inputs = tf.keras.Input(shape=(image_size, image_size, 3))
     x = tf.keras.layers.RandomFlip("horizontal")(inputs)
     x = tf.keras.layers.RandomRotation(0.03)(x)
     x = tf.keras.layers.RandomZoom(0.08)(x)
@@ -120,7 +122,8 @@ def try_load_weights(model, weights_path: Path) -> bool:
         return False
 
 
-def load_checkpoint_model(checkpoint_path: Path):
+def load_checkpoint_model(checkpoint_path: Path, image_size_hint: int = IMAGE_SIZE):
+    """Load the .keras file; fall back to rebuilding the architecture at image_size_hint and loading weights."""
     import tensorflow as tf
 
     try:
@@ -138,9 +141,10 @@ def load_checkpoint_model(checkpoint_path: Path):
         if extracted_weights:
             candidates.append(extracted_weights)
 
+        teb.set_input_geometry(image_size_hint, "squash")  # build_model reads the module geometry
         builders = [
             lambda: build_model(learning_rate=1e-4, train_backbone=True, backbone_weights=None),
-            build_legacy_training_model,
+            lambda: build_legacy_training_model(image_size_hint),
         ]
 
         for weights_path in candidates:
@@ -152,14 +156,12 @@ def load_checkpoint_model(checkpoint_path: Path):
     raise RuntimeError(f"Could not load model or weights from {checkpoint_path}")
 
 
-def export_saved_model(checkpoint_path: Path, export_dir: Path) -> None:
+def export_saved_model(model, export_dir: Path, image_size: int) -> None:
     import tensorflow as tf
-
-    model = load_checkpoint_model(checkpoint_path)
 
     input_signature = [
         tf.TensorSpec(
-            shape=(None, IMAGE_SIZE, IMAGE_SIZE, 3),
+            shape=(None, image_size, image_size, 3),
             dtype=tf.float32,
             name=DEFAULT_INPUT_NAME,
         )
@@ -195,23 +197,16 @@ def graph_io_names(onnx_path: Path) -> tuple[str, str]:
     return input_name, output_name
 
 
-def write_model_config(output_dir: Path, model_name: str, input_name: str, output_name: str) -> Path:
+def write_model_config(output_dir: Path, model_name: str, input_name: str, output_name: str, geometry) -> Path:
     config = {
         "model_name": model_name,
         "nnet_input_name": input_name,
         "nnet_output_name": output_name,
         "output_activation": "linear",
-        "preprocessors": [
-            {
-                "type": "resize",
-                "target_width": IMAGE_SIZE,
-                "target_height": IMAGE_SIZE,
-                "interpolation_mode": "INTER_LINEAR",
-            },
-            {
-                "type": "convert_to_float",
-            },
-        ],
+        "input": {"image_size": geometry.image_size, "resize_mode": geometry.resize_mode},
+        # resize (squash) or letterbox step, then convert_to_float -- infer_onnx.py and
+        # predict_onnx_csv.py read the mode back from here.
+        "preprocessors": preprocessor_steps(geometry.image_size, geometry.resize_mode),
     }
 
     config_path = output_dir / f"{output_dir.name}.json"
@@ -228,6 +223,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True, help="Output model folder, for example models/m4.")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
     parser.add_argument("--force", action="store_true", help="Overwrite output directory if it already exists.")
+    parser.add_argument("--image-size", type=int, default=None,
+                        help="Only needed when the .keras file cannot be loaded whole and the architecture is rebuilt; otherwise taken from the checkpoint.")
+    parser.add_argument("--resize-mode", choices=("squash", "letterbox"), default=None,
+                        help="Preprocessing written into the model JSON. Default: from report.json next to the checkpoint.")
     return parser.parse_args()
 
 
@@ -246,18 +245,31 @@ def main() -> None:
     output_dir.mkdir(parents=True)
     onnx_path = output_dir / f"{output_dir.name}.onnx"
 
+    report_path = find_report(checkpoint_path)
+    provisional = resolve_geometry(args.image_size, args.resize_mode, report_path=report_path)
+    model = load_checkpoint_model(checkpoint_path, provisional.image_size)
+    try:
+        geometry = resolve_geometry(
+            args.image_size, args.resize_mode, model_input_size=int(model.input_shape[1]), report_path=report_path,
+        )
+    except ValueError as error:
+        raise SystemExit(f"Input geometry: {error}") from error
+    print(f"Input geometry: {geometry}")
+
     with tempfile.TemporaryDirectory(prefix="liveness_saved_model_") as temp_dir:
         saved_model_dir = Path(temp_dir) / "saved_model"
-        export_saved_model(checkpoint_path, saved_model_dir)
+        export_saved_model(model, saved_model_dir, geometry.image_size)
         run_tf2onnx(saved_model_dir, onnx_path, args.opset)
 
     input_name, output_name = graph_io_names(onnx_path)
-    config_path = write_model_config(output_dir, onnx_path.name, input_name, output_name)
+    config_path = write_model_config(output_dir, onnx_path.name, input_name, output_name, geometry)
 
     print(json.dumps({
         "checkpoint": str(checkpoint_path),
         "onnx": str(onnx_path),
         "config": str(config_path),
+        "image_size": geometry.image_size,
+        "resize_mode": geometry.resize_mode,
         "input_name": input_name,
         "output_name": output_name,
     }, indent=2))

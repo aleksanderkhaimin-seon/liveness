@@ -9,12 +9,14 @@ from urllib.parse import urlparse
 import numpy as np
 import tensorflow as tf
 
+from input_geometry import find_report, resolve_geometry
 from train_efficientnet_b2 import (
     build_model,
     compute_eer_metrics,
     configure_runtime,
     make_dataset,
     normalize_bbox_value,
+    set_input_geometry,
     sigmoid_np,
 )
 
@@ -204,6 +206,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin", type=float, default=0.0)
     parser.add_argument("--require-gpu", action="store_true")
     parser.add_argument("--mixed-precision", action="store_true")
+    parser.add_argument("--image-size", type=int, default=None,
+                        help="Network input side. Default: taken from the model; must match it.")
+    parser.add_argument("--resize-mode", choices=("squash", "letterbox"), default=None,
+                        help="How frames are brought to the input square. Default: from the run's report.json next to the checkpoint.")
+
     return parser.parse_args()
 
 
@@ -229,7 +236,18 @@ def main() -> None:
         preview = "\n".join(missing_paths[:20])
         raise FileNotFoundError(f"{len(missing_paths)} local files are missing after sync/copy:\n{preview}")
 
+    report_path = find_report(args.checkpoint)
+    provisional = resolve_geometry(args.image_size, args.resize_mode, report_path=report_path)
+    set_input_geometry(provisional.image_size, provisional.resize_mode)
     model = load_model(args.checkpoint)
+    try:
+        geometry = resolve_geometry(
+            args.image_size, args.resize_mode, model_input_size=int(model.input_shape[1]), report_path=report_path,
+        )
+    except ValueError as error:
+        raise SystemExit(f"Input geometry: {error}") from error
+    set_input_geometry(geometry.image_size, geometry.resize_mode)
+    print(f"Input geometry: {geometry}")
     compile_for_eval(model)
     logits, scores = predict(
         model=model,

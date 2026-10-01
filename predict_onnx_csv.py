@@ -10,7 +10,7 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
-IMAGE_SIZE = 512
+from input_geometry import InputGeometry, fit_to_input_array, resolve_geometry
 
 
 # ── CSV helpers (mirrors predict_checkpoint_csv.py) ──────────────────────────
@@ -138,12 +138,11 @@ def crop_by_bbox(img: Image.Image, bbox_str: str, margin: float) -> Image.Image:
                      int(math.ceil(x2)),  int(math.ceil(y2))))
 
 
-def load_image(path: str, bbox: str, use_bbox_crop: bool, margin: float) -> np.ndarray:
+def load_image(path: str, bbox: str, use_bbox_crop: bool, margin: float, geometry: InputGeometry) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     if use_bbox_crop:
         img = crop_by_bbox(img, bbox, margin)
-    img = img.resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
-    return np.array(img, dtype=np.float32)  # [H, W, 3] in [0, 255]
+    return fit_to_input_array(img, geometry.image_size, geometry.resize_mode)  # [H, W, 3] in [0, 255]
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
@@ -159,6 +158,7 @@ def predict(
     batch_size: int,
     use_bbox_crop: bool,
     margin: float,
+    geometry: InputGeometry,
 ) -> np.ndarray:
     input_name = session.get_inputs()[0].name
     all_scores = []
@@ -170,10 +170,10 @@ def predict(
         images = []
         for path, bbox in zip(batch_paths, batch_bboxes):
             try:
-                images.append(load_image(path, bbox, use_bbox_crop, margin))
+                images.append(load_image(path, bbox, use_bbox_crop, margin, geometry))
             except Exception as e:
                 print(f"Warning: failed to load {path}: {e}", file=sys.stderr)
-                images.append(np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.float32))
+                images.append(np.zeros((geometry.image_size, geometry.image_size, 3), dtype=np.float32))
 
         batch = np.stack(images, axis=0)  # [B, H, W, 3]
         logits = session.run(None, {input_name: batch})[0].reshape(-1)
@@ -198,6 +198,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin", type=float, default=0.0)
     parser.add_argument("--on-missing", choices=["skip", "raise"], default="skip")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--image-size", type=int, default=None,
+                        help="Network input side. Default: from the ONNX input shape; must match it.")
+    parser.add_argument("--resize-mode", choices=("squash", "letterbox"), default=None,
+                        help="Default: from the model's JSON config next to the .onnx (letterbox step or input block).")
     return parser.parse_args()
 
 
@@ -208,6 +212,16 @@ def main() -> None:
     session = ort.InferenceSession(str(args.model), providers=providers)
     print(f"Loaded {args.model}, providers: {session.get_providers()}")
 
+    onnx_shape = session.get_inputs()[0].shape  # [N, H, W, 3]; H may be symbolic
+    model_input_size = int(onnx_shape[1]) if isinstance(onnx_shape[1], int) else None
+    config_path = args.model.with_suffix(".json")
+    model_config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else None
+    try:
+        geometry = resolve_geometry(args.image_size, args.resize_mode, model_input_size=model_input_size, model_config=model_config)
+    except ValueError as error:
+        raise SystemExit(f"Input geometry: {error}") from error
+    print(f"Input geometry: {geometry}")
+
     original_paths, resolved_paths, labels, bboxes = read_prediction_csv(
         args.input_csv, use_bbox_crop=args.use_bbox_crop,
     )
@@ -215,7 +229,7 @@ def main() -> None:
         original_paths, resolved_paths, labels, bboxes, args.on_missing,
     )
 
-    scores = predict(session, resolved_paths, bboxes, args.batch_size, args.use_bbox_crop, args.margin)
+    scores = predict(session, resolved_paths, bboxes, args.batch_size, args.use_bbox_crop, args.margin, geometry)
     write_scores(args.output_csv, original_paths, labels, scores)
     print(f"Saved predictions to: {args.output_csv}")
 

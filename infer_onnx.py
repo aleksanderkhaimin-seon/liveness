@@ -8,6 +8,8 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
+from input_geometry import fit_to_input_pil
+
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
@@ -83,6 +85,13 @@ def apply_preprocessors(image: Image.Image, config: dict) -> np.ndarray:
             height = int(step["target_height"])
             interpolation = interpolation_mode(step.get("interpolation_mode", "INTER_NEAREST"))
             current_image = current_image.resize((width, height), interpolation)
+            array = None
+            continue
+
+        if step_type == "letterbox":
+            # Downscale only if larger, never upscale, pad centred with the frame mean
+            # (train_efficientnet_b2.fit_to_input with resize_mode=letterbox).
+            current_image = fit_to_input_pil(current_image, int(step["target_width"]), "letterbox")
             array = None
             continue
 

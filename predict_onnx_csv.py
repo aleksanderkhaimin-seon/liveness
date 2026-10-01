@@ -183,7 +183,8 @@ def predict(
         print(f"\r{done}/{len(paths)}", end="", flush=True)
 
     print()
-    return np.concatenate(all_scores)
+    # Probabilities, as predict_checkpoint_csv.py writes; the ONNX graph outputs logits.
+    return sigmoid(np.concatenate(all_scores))
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

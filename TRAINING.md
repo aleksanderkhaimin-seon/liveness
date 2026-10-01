@@ -183,6 +183,12 @@ Fine-tune the EfficientNetB2 backbone immediately:
 python train_efficientnet_b2.py --csv test_df.csv --train-backbone
 ```
 
+## Input Size And Resize Mode
+
+`--image-size N` (config key `image_size`, default 512) sets the network input side; `--resize-mode squash|letterbox` (default `squash`) sets how a frame is brought to that square. `squash` is the historical bilinear resize ignoring aspect. `letterbox` downsamples with an area filter only if the frame is larger than the target, never upsamples, and pads centred with the frame's mean colour — a frame that already fits is copied pixel for pixel. Frames exported with `export_lowres_frames.py --mode doc --size 96` are 164–211 px on the long side, so at `--image-size 224 --resize-mode letterbox` almost none of them is resampled at all.
+
+`report.json` records `input.{image_size, resize_mode}` and `throughput.{train_seconds_per_epoch, train_images_per_sec}`. `predict_onnx_csv.py`, `predict_checkpoint_csv.py`, `convert_checkpoint_to_onnx.py` and `infer_onnx.py` still assume 512 and need the size passed through before a model trained at another size is exported.
+
 ## Anonymisation Degradations
 
 `--degrade` applies content-destroying transforms to the decoded frame before any bbox crop and before the resize to 512. They run identically on train, validation and test and on both classes, so they cannot become a label shortcut. Use them to measure how much EER survives a given anonymisation before building the export for it.

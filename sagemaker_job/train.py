@@ -217,6 +217,8 @@ def build_command(hps: dict[str, str]) -> list[str]:
         "bbox_aug_prob": "--bbox-aug-prob",
         "degrade": "--degrade",
         "checkpoint_monitor": "--checkpoint-monitor",
+        "image_size": "--image-size",
+        "resize_mode": "--resize-mode",
         "comment": "--comment",
     }
     for key, flag in scalar_flags.items():

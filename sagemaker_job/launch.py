@@ -308,6 +308,8 @@ def build_hyperparameters(
         "bbox_aug_prob",
         "degrade",
         "checkpoint_monitor",
+        "image_size",
+        "resize_mode",
         "comment",
     )
     for key in passthrough:
@@ -331,6 +333,8 @@ def build_hyperparameters(
         "bbox_aug_prob": args.bbox_aug_prob,
         "degrade": getattr(args, "degrade", None),
         "checkpoint_monitor": getattr(args, "checkpoint_monitor", None),
+        "image_size": getattr(args, "image_size", None),
+        "resize_mode": getattr(args, "resize_mode", None),
         "comment": args.comment,
     }
     for key, value in cli_overrides.items():
@@ -407,6 +411,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-monitor", default=None, choices=("val_eer", "val_auc", "val_loss", "val_acer"),
                         help="Validation metric selecting best.keras (training default: val_eer).")
+    parser.add_argument("--image-size", type=int, default=None, help="Network input side in px (training default 512).")
+    parser.add_argument("--resize-mode", default=None, choices=("squash", "letterbox"))
     parser.add_argument("--comment", default=None)
     parser.add_argument("--subnets", nargs="*", default=None)
     parser.add_argument("--security-group-ids", nargs="*", default=None)

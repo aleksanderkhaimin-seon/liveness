@@ -5,6 +5,7 @@ import json
 import math
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import albumentations as A
@@ -15,7 +16,55 @@ from eer import compute_eer, get_fr_fa_at_threshold
 
 
 AUTOTUNE = tf.data.AUTOTUNE
-IMAGE_SIZE = 512
+IMAGE_SIZE = 512          # set from --image-size / config in main()
+RESIZE_MODE = "squash"    # set from --resize-mode / config in main(): squash | letterbox
+RESIZE_MODES = ("squash", "letterbox")
+
+
+def set_input_geometry(image_size: int, resize_mode: str) -> None:
+    global IMAGE_SIZE, RESIZE_MODE
+    if image_size < 64:
+        raise ValueError(f"image_size must be at least 64, got {image_size}")
+    if resize_mode not in RESIZE_MODES:
+        raise ValueError(f"resize_mode must be one of {RESIZE_MODES}, got {resize_mode!r}")
+    IMAGE_SIZE = int(image_size)
+    RESIZE_MODE = resize_mode
+
+
+def fit_to_input(image: tf.Tensor) -> tf.Tensor:
+    """Bring a decoded float image to (IMAGE_SIZE, IMAGE_SIZE, 3).
+
+    squash    : bilinear resize to the square, ignoring aspect (historical behaviour).
+    letterbox : downscale with an area filter only if the frame exceeds the target,
+                never upscale, then pad centred with the frame's per-channel mean.
+                A frame that already fits is copied pixel for pixel.
+    """
+    if RESIZE_MODE == "squash":
+        return tf.image.resize(image, (IMAGE_SIZE, IMAGE_SIZE), method="bilinear")
+
+    shape = tf.shape(image)
+    height = shape[0]
+    width = shape[1]
+    scale = tf.minimum(1.0, IMAGE_SIZE / tf.cast(tf.maximum(height, width), tf.float32))
+
+    def shrink() -> tf.Tensor:
+        new_height = tf.maximum(1, tf.cast(tf.round(tf.cast(height, tf.float32) * scale), tf.int32))
+        new_width = tf.maximum(1, tf.cast(tf.round(tf.cast(width, tf.float32) * scale), tf.int32))
+        return tf.image.resize(image, (new_height, new_width), method="area")
+
+    image = tf.cond(scale < 1.0, shrink, lambda: image)
+    shape = tf.shape(image)
+    height = tf.minimum(shape[0], IMAGE_SIZE)
+    width = tf.minimum(shape[1], IMAGE_SIZE)
+    image = image[:height, :width]
+    top = (IMAGE_SIZE - height) // 2
+    left = (IMAGE_SIZE - width) // 2
+    paddings = [[top, IMAGE_SIZE - height - top], [left, IMAGE_SIZE - width - left], [0, 0]]
+    mean = tf.reduce_mean(image, axis=[0, 1], keepdims=True)
+    # Pad with zeros and add the mean only where padding was inserted, so the
+    # frame itself is copied exactly rather than passing through a subtract/add.
+    pad_mask = tf.pad(tf.zeros_like(image[..., :1]), paddings, constant_values=1.0)
+    return tf.pad(image, paddings) + pad_mask * mean
 
 
 AUGMENTER = A.Compose(
@@ -389,7 +438,7 @@ def load_image(
         has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
         should_crop = tf.math.logical_and(has_bbox, tf.random.uniform(()) < bbox_aug_prob)
         image = tf.cond(should_crop, lambda: crop_by_bbox(image, bbox, margin), lambda: image)
-    image = tf.image.resize(image, (IMAGE_SIZE, IMAGE_SIZE), method="bilinear")
+    image = fit_to_input(image)
     image = tf.cast(image, tf.float32)
     label = tf.cast(label, tf.float32)
     return image, label
@@ -583,6 +632,23 @@ class EERCallback(tf.keras.callbacks.Callback):
         )
 
 
+class TrainTimingCallback(tf.keras.callbacks.Callback):
+    """Wall time of the training phase of each epoch (epoch begin -> validation begin)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.train_seconds: list[float] = []
+        self._t0 = 0.0
+
+    def on_epoch_begin(self, epoch: int, logs: dict | None = None) -> None:
+        self._t0 = time.perf_counter()
+
+    def on_test_begin(self, logs: dict | None = None) -> None:
+        if self._t0:
+            self.train_seconds.append(time.perf_counter() - self._t0)
+            self._t0 = 0.0
+
+
 class LearningRateLogger(tf.keras.callbacks.Callback):
     def _current_learning_rate(self) -> float:
         learning_rate = self.model.optimizer.learning_rate
@@ -662,6 +728,8 @@ CONFIG_DEFAULTS = {
     "bbox_aug_prob": 0.0,
     "degrade": "",
     "checkpoint_monitor": "val_eer",
+    "image_size": 512,
+    "resize_mode": "squash",
     "comment": "",
 }
 CHECKPOINT_MODES = {"val_eer": "min", "val_auc": "max", "val_loss": "min", "val_acer": "min"}
@@ -749,6 +817,14 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(CHECKPOINT_MODES),
         help="Validation metric that selects best.keras. Default val_eer: validation is production "
         "data and EER is the metric acted on; val_auc peaked at epoch 0 in most runs while EER did not.",
+    )
+    parser.add_argument("--image-size", type=int, help="Network input side in px (default 512). Exported doc:96 frames are ~170-210 px.")
+    parser.add_argument(
+        "--resize-mode",
+        type=str,
+        choices=RESIZE_MODES,
+        help="squash: bilinear to the square ignoring aspect (default). letterbox: downscale only if larger, "
+        "never upscale, pad with the frame mean -- frames that fit are passed through pixel for pixel.",
     )
     parser.add_argument("--comment", type=str, help="Free-text note saved to report.json.")
     args = parser.parse_args()
@@ -838,6 +914,11 @@ def main() -> None:
     args = parse_args()
     tf.keras.utils.set_random_seed(args.seed)
     configure_runtime(args.require_gpu, args.mixed_precision)
+    try:
+        set_input_geometry(args.image_size, args.resize_mode)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    print(f"Input geometry: {IMAGE_SIZE}x{IMAGE_SIZE}, {RESIZE_MODE}")
 
     try:
         DEGRADATIONS[:] = parse_degrade(args.degrade or "")
@@ -942,6 +1023,8 @@ def main() -> None:
         json.dump(config_as_dict(args), file, indent=2)
 
     callbacks = build_callbacks(args, validation_paths, validation_labels, validation_bboxes)
+    timing = TrainTimingCallback()
+    callbacks.append(timing)
 
     print(f"Starting training for requested epochs: {args.epochs}")
     history = model.fit(
@@ -990,6 +1073,12 @@ def main() -> None:
             "aug_prob": args.bbox_aug_prob,
         },
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
+        "input": {"image_size": IMAGE_SIZE, "resize_mode": RESIZE_MODE},
+        "throughput": {
+            "train_seconds_per_epoch": [round(v, 1) for v in timing.train_seconds],
+            "train_images_per_sec": round(len(train_paths) / (sum(timing.train_seconds) / len(timing.train_seconds)), 1)
+            if timing.train_seconds else None,
+        },
         "checkpoint": {
             "monitor": args.checkpoint_monitor,
             "mode": CHECKPOINT_MODES[args.checkpoint_monitor],

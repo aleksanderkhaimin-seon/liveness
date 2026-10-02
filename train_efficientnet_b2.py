@@ -67,22 +67,61 @@ def fit_to_input(image: tf.Tensor) -> tf.Tensor:
     return tf.pad(image, paddings) + pad_mask * mean
 
 
-AUGMENTER = A.Compose(
-    [
-        A.HorizontalFlip(p=0.5),
-        A.Affine(
-            scale=(0.92, 1.08),
-            rotate=(-10.8, 10.8),
-            border_mode=1,
-            p=1.0,
-        ),
-        A.MultiplicativeNoise(
-            multiplier=(0.8, 1.2),
-            per_channel=False,
-            p=1.0,
-        ),
-    ]
-)
+_BASE_AUGMENTATIONS = [
+    A.HorizontalFlip(p=0.5),
+    A.Affine(
+        scale=(0.92, 1.08),
+        rotate=(-10.8, 10.8),
+        border_mode=1,
+        p=1.0,
+    ),
+    A.MultiplicativeNoise(
+        multiplier=(0.8, 1.2),
+        per_channel=False,
+        p=1.0,
+    ),
+]
+
+# Extra photometric / camera / framing variation aimed at the train->production
+# gap: it is coarse capture conditions (display brightness and colour cast, glare,
+# sensor noise, compression, tilt) that differ between collection setups and
+# production, not fine texture. Applied after the resize, so blur and noise act
+# at network-input scale. Only albumentations arguments that are stable across
+# 1.x and 2.x are used.
+_DOMAIN_AUGMENTATIONS = [
+    A.OneOf(
+        [
+            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=1.0),
+            A.RandomGamma(gamma_limit=(70, 140), p=1.0),
+        ],
+        p=0.8,
+    ),
+    A.OneOf(
+        [
+            A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=30, val_shift_limit=20, p=1.0),
+            A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=1.0),
+        ],
+        p=0.6,
+    ),
+    A.OneOf([A.GaussianBlur(p=1.0), A.MotionBlur(p=1.0), A.Defocus(p=1.0)], p=0.3),
+    A.GaussNoise(p=0.3),
+    A.ImageCompression(p=0.4),
+    A.Perspective(scale=(0.02, 0.08), p=0.3),
+    A.RandomShadow(p=0.2),
+]
+
+AUGMENT_PRESETS = {
+    "base": _BASE_AUGMENTATIONS,
+    "domain": _BASE_AUGMENTATIONS + _DOMAIN_AUGMENTATIONS,
+}
+AUGMENTER = A.Compose(AUGMENT_PRESETS["base"])
+
+
+def set_augment_preset(name: str) -> None:
+    global AUGMENTER
+    if name not in AUGMENT_PRESETS:
+        raise ValueError(f"augment must be one of {sorted(AUGMENT_PRESETS)}, got {name!r}")
+    AUGMENTER = A.Compose(AUGMENT_PRESETS[name])
 
 
 def configure_runtime(require_gpu: bool, mixed_precision: bool) -> None:
@@ -727,6 +766,7 @@ CONFIG_DEFAULTS = {
     "margin": 0.0,
     "bbox_aug_prob": 0.0,
     "degrade": "",
+    "augment": "base",
     "checkpoint_monitor": "val_eer",
     "image_size": 512,
     "resize_mode": "squash",
@@ -818,6 +858,7 @@ def parse_args() -> argparse.Namespace:
         help="Validation metric that selects best.keras. Default val_eer: validation is production "
         "data and EER is the metric acted on; val_auc peaked at epoch 0 in most runs while EER did not.",
     )
+    parser.add_argument("--augment", choices=sorted(AUGMENT_PRESETS), help="Training augmentation preset: base (flip/affine/noise) or domain (adds photometric, blur, noise, JPEG, perspective, shadow).")
     parser.add_argument("--image-size", type=int, help="Network input side in px (default 512). Exported doc:96 frames are ~170-210 px.")
     parser.add_argument(
         "--resize-mode",
@@ -919,6 +960,8 @@ def main() -> None:
     except ValueError as error:
         raise SystemExit(str(error)) from error
     print(f"Input geometry: {IMAGE_SIZE}x{IMAGE_SIZE}, {RESIZE_MODE}")
+    set_augment_preset(args.augment)
+    print(f"Augmentation preset: {args.augment}")
 
     try:
         DEGRADATIONS[:] = parse_degrade(args.degrade or "")

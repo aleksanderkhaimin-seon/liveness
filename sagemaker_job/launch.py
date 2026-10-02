@@ -307,6 +307,7 @@ def build_hyperparameters(
         "margin",
         "bbox_aug_prob",
         "degrade",
+        "augment",
         "checkpoint_monitor",
         "image_size",
         "resize_mode",
@@ -332,6 +333,7 @@ def build_hyperparameters(
         "margin": args.margin,
         "bbox_aug_prob": args.bbox_aug_prob,
         "degrade": getattr(args, "degrade", None),
+        "augment": getattr(args, "augment", None),
         "checkpoint_monitor": getattr(args, "checkpoint_monitor", None),
         "image_size": getattr(args, "image_size", None),
         "resize_mode": getattr(args, "resize_mode", None),
@@ -409,6 +411,8 @@ def parse_args() -> argparse.Namespace:
         help="Anonymisation degradations for train_efficientnet_b2.py, e.g. mask:0.05,downscale:192. "
         "Overrides the config's degrade key.",
     )
+    parser.add_argument("--augment", default=None, choices=("base", "domain"),
+                        help="Training augmentation preset (training default: base).")
     parser.add_argument("--checkpoint-monitor", default=None, choices=("val_eer", "val_auc", "val_loss", "val_acer"),
                         help="Validation metric selecting best.keras (training default: val_eer).")
     parser.add_argument("--image-size", type=int, default=None, help="Network input side in px (training default 512).")

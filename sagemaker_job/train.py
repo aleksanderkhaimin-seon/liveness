@@ -216,6 +216,7 @@ def build_command(hps: dict[str, str]) -> list[str]:
         "margin": "--margin",
         "bbox_aug_prob": "--bbox-aug-prob",
         "degrade": "--degrade",
+        "augment": "--augment",
         "checkpoint_monitor": "--checkpoint-monitor",
         "image_size": "--image-size",
         "resize_mode": "--resize-mode",

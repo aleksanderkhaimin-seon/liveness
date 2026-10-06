@@ -165,6 +165,24 @@ python data_prep/prepare_prodtest_val.py \
   --output-csv data/ProdTest-0.2-val.csv
 ```
 
+### Screen-replay input CSV
+
+`synth_screen_replay.py` reads `path,label,bbox`, with `bbox` as JSON `[x1,y1,x2,y2]`. Document-detector dumps (`*_docdet_ik.csv`) store a quadrilateral in `corner_tl/tr/br/bl`. `data_prep/docdet_to_replay_csv.py` turns those corners into an axis-aligned box, clipped to `width` and `height`.
+
+`*_docdet_ik.csv` is written next to itself as `*_replay.csv`. Other names get a `_replay` suffix. `--label` defaults to `1` (live source). The replay script ignores that column and writes its own `--label`. `--accept-only` keeps rows whose `decision` is `ACCEPT`.
+
+```bash
+python data_prep/docdet_to_replay_csv.py data/PS-generated-batch-1_docdet_ik.csv
+python data_prep/docdet_to_replay_csv.py data/*_docdet_ik.csv --accept-only
+```
+
+Then generate replay frames:
+
+```bash
+python synth_screen_replay.py data/PS-generated-batch-1_replay.csv \
+  --out-dir /data/synth/replay --mode mixed --workers 16
+```
+
 ### Where to look after submit
 
 1. **Jobs → Training** — status, CloudWatch logs, failure reason

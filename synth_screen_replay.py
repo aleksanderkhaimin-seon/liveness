@@ -42,6 +42,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -434,12 +435,19 @@ def main() -> None:
             jobs.append((copy * len(inputs) + i, src, args.label, bbox, str(args.out_dir), args_dict))
 
     results = []
-    if args.workers > 1:
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            for r in pool.map(process, jobs, chunksize=16):
-                results.append(r)
-    else:
-        results = [process(j) for j in jobs]
+    progress = tqdm(total=len(jobs), desc="replay", unit="img")
+    try:
+        if args.workers > 1:
+            with ProcessPoolExecutor(max_workers=args.workers) as pool:
+                for r in pool.map(process, jobs, chunksize=16):
+                    results.append(r)
+                    progress.update(1)
+        else:
+            for job in jobs:
+                results.append(process(job))
+                progress.update(1)
+    finally:
+        progress.close()
 
     ok = [r for r in results if r["ok"]]
     failed = [r for r in results if not r["ok"]]

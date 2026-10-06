@@ -5,3 +5,4 @@ onnx==1.21.0
 onnxruntime
 Pillow
 tf2onnx==1.17.0
+tqdm

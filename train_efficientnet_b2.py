@@ -42,6 +42,7 @@ def fit_to_input(image: tf.Tensor) -> tf.Tensor:
     if RESIZE_MODE == "squash":
         return tf.image.resize(image, (IMAGE_SIZE, IMAGE_SIZE), method="bilinear")
 
+    image = tf.cast(image, tf.float32)
     shape = tf.shape(image)
     height = shape[0]
     width = shape[1]
@@ -469,8 +470,12 @@ def load_image(
 ) -> tuple[tf.Tensor, tf.Tensor]:
     image = tf.io.read_file(path)
     image = tf.io.decode_image(image, channels=3, expand_animations=False)
-    image = tf.cast(image, tf.float32)
-    image = apply_degradations(image, bbox)
+    if DEGRADATIONS:
+        # Degradations work in float; without them the frame stays uint8 through
+        # crop and resize (tf.image.resize converts internally), which avoids
+        # materialising a 4x larger full-resolution tensor per image.
+        image = tf.cast(image, tf.float32)
+        image = apply_degradations(image, bbox)
     if use_bbox_crop:
         image = crop_by_bbox(image, bbox, margin)
     elif bbox_aug_prob > 0.0:

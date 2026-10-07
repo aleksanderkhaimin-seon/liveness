@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
+from progress_util import progress
 from input_geometry import find_report, resolve_geometry
 from predict_checkpoint_csv import filter_missing_files, load_model, read_prediction_csv
 from train_efficientnet_b2 import configure_runtime, make_dataset, set_input_geometry
@@ -44,23 +45,6 @@ def sample_rows(rows, labels, max_per_class: int, seed: int):
         keep.extend(idx.tolist())
     keep.sort()
     return keep
-
-
-def progress(iterable, total: int, desc: str):
-    """tqdm bar on a terminal; a plain line roughly every 10% otherwise (SageMaker logs don't redraw bars)."""
-    try:
-        from tqdm import tqdm
-        if sys.stdout.isatty():
-            yield from tqdm(iterable, total=total, desc=desc)
-            return
-    except ImportError:
-        pass
-    every = max(1, total // 10)
-    print(desc, flush=True)
-    for i, item in enumerate(iterable, start=1):
-        yield item
-        if i % every == 0 or i == total:
-            print(f"  {i}/{total} batches ({100 * i // total}%)", flush=True)
 
 
 def embed(model: tf.keras.Model, csv_path: Path, args, name: str = "") -> tuple[np.ndarray, np.ndarray]:
@@ -149,7 +133,7 @@ def plot(fa, la, fb, lb, path: Path) -> None:
         for c, color in ((1, "tab:green"), (0, "tab:red")):
             m = (src == s) & (lab == c)
             ax.scatter(z[m, 0], z[m, 1], s=8, marker=marker, c=color, alpha=0.4,
-                       label=f"{name} {'live' if c else 'attack'}")
+                       label=f"{name} label {c}")
     ax.legend(); ax.set_title("PCA of pooled embeddings")
     fig.savefig(path, dpi=130, bbox_inches="tight")
 
@@ -187,7 +171,7 @@ def main() -> None:
 
     result = {"checkpoint": str(args.checkpoint), "a": str(args.a), "b": str(args.b),
               "overall": gap_metrics(fa, fb, args.seed)}
-    for cls, name in ((1, "live"), (0, "attack")):
+    for cls, name in ((1, "label_1"), (0, "label_0")):
         if (la == cls).sum() > 20 and (lb == cls).sum() > 20:
             result[name] = gap_metrics(fa[la == cls], fb[lb == cls], args.seed)
 

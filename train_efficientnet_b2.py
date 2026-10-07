@@ -677,19 +677,34 @@ class EERCallback(tf.keras.callbacks.Callback):
 
 
 class TrainTimingCallback(tf.keras.callbacks.Callback):
-    """Wall time of the training phase of each epoch (epoch begin -> validation begin)."""
+    """Per-epoch wall time split: training steps, Keras validation pass, and the rest
+    (EER callback predict over validation, checkpoint saves) -- so a slow run shows
+    *where* it is slow. Must be last in the callbacks list so its on_epoch_end runs
+    after the EER callback and the checkpoints."""
 
     def __init__(self) -> None:
         super().__init__()
         self.train_seconds: list[float] = []
+        self.val_seconds: list[float] = []
+        self.epoch_seconds: list[float] = []
         self._t0 = 0.0
+        self._t_val = 0.0
 
     def on_epoch_begin(self, epoch: int, logs: dict | None = None) -> None:
         self._t0 = time.perf_counter()
 
     def on_test_begin(self, logs: dict | None = None) -> None:
-        if self._t0:
+        if self._t0 and len(self.train_seconds) == len(self.epoch_seconds):
             self.train_seconds.append(time.perf_counter() - self._t0)
+        self._t_val = time.perf_counter()
+
+    def on_test_end(self, logs: dict | None = None) -> None:
+        if self._t_val and len(self.val_seconds) == len(self.epoch_seconds):
+            self.val_seconds.append(time.perf_counter() - self._t_val)
+
+    def on_epoch_end(self, epoch: int, logs: dict | None = None) -> None:
+        if self._t0:
+            self.epoch_seconds.append(time.perf_counter() - self._t0)
             self._t0 = 0.0
 
 
@@ -1124,8 +1139,16 @@ def main() -> None:
         "input": {"image_size": IMAGE_SIZE, "resize_mode": RESIZE_MODE},
         "throughput": {
             "train_seconds_per_epoch": [round(v, 1) for v in timing.train_seconds],
+            "keras_validation_seconds_per_epoch": [round(v, 1) for v in timing.val_seconds],
+            "other_seconds_per_epoch": [
+                round(e - t - v, 1) for e, t, v in zip(timing.epoch_seconds, timing.train_seconds, timing.val_seconds)
+            ],  # EER callback predict over validation + checkpoint saves
+            "epoch_wall_seconds": [round(v, 1) for v in timing.epoch_seconds],
             "train_images_per_sec": round(len(train_paths) / (sum(timing.train_seconds) / len(timing.train_seconds)), 1)
             if timing.train_seconds else None,
+            "steady_state_train_images_per_sec": round(len(train_paths) / min(timing.train_seconds), 1)
+            if timing.train_seconds else None,
+            "fit_wall_seconds": round(sum(timing.epoch_seconds), 1),
         },
         "checkpoint": {
             "monitor": args.checkpoint_monitor,

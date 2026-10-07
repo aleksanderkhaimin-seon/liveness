@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -45,7 +46,24 @@ def sample_rows(rows, labels, max_per_class: int, seed: int):
     return keep
 
 
-def embed(model: tf.keras.Model, csv_path: Path, args) -> tuple[np.ndarray, np.ndarray]:
+def progress(iterable, total: int, desc: str):
+    """tqdm bar on a terminal; a plain line roughly every 10% otherwise (SageMaker logs don't redraw bars)."""
+    try:
+        from tqdm import tqdm
+        if sys.stdout.isatty():
+            yield from tqdm(iterable, total=total, desc=desc)
+            return
+    except ImportError:
+        pass
+    every = max(1, total // 10)
+    print(desc, flush=True)
+    for i, item in enumerate(iterable, start=1):
+        yield item
+        if i % every == 0 or i == total:
+            print(f"  {i}/{total} batches ({100 * i // total}%)", flush=True)
+
+
+def embed(model: tf.keras.Model, csv_path: Path, args, name: str = "") -> tuple[np.ndarray, np.ndarray]:
     orig, resolved, labels, bboxes = read_prediction_csv(csv_path, use_bbox_crop=args.use_bbox_crop)
     orig, resolved, labels, bboxes = filter_missing_files(orig, resolved, labels, bboxes, "skip")
     keep = sample_rows(resolved, labels, args.max_per_class, args.seed)
@@ -57,7 +75,13 @@ def embed(model: tf.keras.Model, csv_path: Path, args) -> tuple[np.ndarray, np.n
     # Feature input of the last Dense layer == pooled backbone output (Dropout is identity at inference).
     head = model.get_layer("live_score")
     feature_model = tf.keras.Model(model.input, head.input)
-    feats = feature_model.predict(dataset, verbose=0).astype(np.float32)
+    total = int(np.ceil(len(resolved) / args.batch_size))
+    desc = f"Embedding {name or csv_path.name} ({len(resolved)} images)"
+    chunks = []
+    for batch in progress(dataset, total, desc):
+        images = batch[0] if isinstance(batch, (tuple, list)) else batch
+        chunks.append(feature_model(images, training=False).numpy())
+    feats = np.concatenate(chunks).astype(np.float32)
     return feats, labels
 
 
@@ -158,8 +182,8 @@ def main() -> None:
     geo = resolve_geometry(args.image_size, args.resize_mode, model_input_size=int(model.input_shape[1]), report_path=report)
     set_input_geometry(geo.image_size, geo.resize_mode)
 
-    fa, la = embed(model, args.a, args)
-    fb, lb = embed(model, args.b, args)
+    fa, la = embed(model, args.a, args, "A")
+    fb, lb = embed(model, args.b, args, "B")
 
     result = {"checkpoint": str(args.checkpoint), "a": str(args.a), "b": str(args.b),
               "overall": gap_metrics(fa, fb, args.seed)}

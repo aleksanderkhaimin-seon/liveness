@@ -215,6 +215,7 @@ def build_command(hps: dict[str, str]) -> list[str]:
         "eer_threshold": "--eer-threshold",
         "margin": "--margin",
         "bbox_aug_prob": "--bbox-aug-prob",
+        "rot90_prob": "--rot90-prob",
         "degrade": "--degrade",
         "augment": "--augment",
         "freq_aug": "--freq-aug",

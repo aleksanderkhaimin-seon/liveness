@@ -137,6 +137,16 @@ python sagemaker_job/launch_eval.py \
 
 You can mix `--onnx` and `--checkpoint`. Converted ONNX is written to the job output as `converted/<name>/<name>.onnx`.
 
+`--rotate 0 90` scores every model once per rotation, with frames rotated counter-clockwise after the bbox crop. This tests whether a model depends on frame orientation (see [TRAINING.md](TRAINING.md#orientation)). Rotated runs write `<model>_rot90_predictions.csv` and an `eval_report.json` entry with `"rotate": 90`. `visualize_sagemaker_jobs.py` ignores them when it picks a job's EER.
+
+```bash
+python sagemaker_job/launch_eval.py \
+  --csv data/ProdTest-0.3.csv \
+  --checkpoint eval_results/liveness-efficientnet-b2-20260930101833/output/best.keras \
+  --rotate 0 90 \
+  --no-wait
+```
+
 `--csv` defaults to `data/ProdTest-0.2-val.csv`. ONNX files are uploaded with the job source. ProdTest images stay on the prod EFS mount.
 
 `--device auto` (default) uses onnxruntime on CPU unless the instance actually has a GPU, so CPU instances work without extra flags:

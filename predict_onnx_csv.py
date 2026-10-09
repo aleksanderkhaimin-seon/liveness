@@ -138,10 +138,17 @@ def crop_by_bbox(img: Image.Image, bbox_str: str, margin: float) -> Image.Image:
                      int(math.ceil(x2)),  int(math.ceil(y2))))
 
 
-def load_image(path: str, bbox: str, use_bbox_crop: bool, margin: float, geometry: InputGeometry) -> np.ndarray:
+# Counter-clockwise, matching tf.image.rot90 in train_efficientnet_b2.load_image.
+ROTATIONS = {90: Image.Transpose.ROTATE_90, 180: Image.Transpose.ROTATE_180, 270: Image.Transpose.ROTATE_270}
+
+
+def load_image(path: str, bbox: str, use_bbox_crop: bool, margin: float, geometry: InputGeometry,
+               rotate: int = 0) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     if use_bbox_crop:
         img = crop_by_bbox(img, bbox, margin)
+    if rotate:
+        img = img.transpose(ROTATIONS[rotate])
     return fit_to_input_array(img, geometry.image_size, geometry.resize_mode)  # [H, W, 3] in [0, 255]
 
 
@@ -159,6 +166,7 @@ def predict(
     use_bbox_crop: bool,
     margin: float,
     geometry: InputGeometry,
+    rotate: int = 0,
 ) -> np.ndarray:
     input_name = session.get_inputs()[0].name
     all_scores = []
@@ -170,7 +178,7 @@ def predict(
         images = []
         for path, bbox in zip(batch_paths, batch_bboxes):
             try:
-                images.append(load_image(path, bbox, use_bbox_crop, margin, geometry))
+                images.append(load_image(path, bbox, use_bbox_crop, margin, geometry, rotate))
             except Exception as e:
                 print(f"Warning: failed to load {path}: {e}", file=sys.stderr)
                 images.append(np.zeros((geometry.image_size, geometry.image_size, 3), dtype=np.float32))
@@ -197,6 +205,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--use-bbox-crop", action="store_true")
     parser.add_argument("--margin", type=float, default=0.0)
+    parser.add_argument("--rotate", type=int, choices=(0, 90, 180, 270), default=0,
+                        help="Rotate every frame counter-clockwise by this many degrees after the bbox crop, "
+                        "e.g. to test whether the model depends on frame orientation.")
     parser.add_argument("--on-missing", choices=["skip", "raise"], default="skip")
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--image-size", type=int, default=None,
@@ -230,7 +241,10 @@ def main() -> None:
         original_paths, resolved_paths, labels, bboxes, args.on_missing,
     )
 
-    scores = predict(session, resolved_paths, bboxes, args.batch_size, args.use_bbox_crop, args.margin, geometry)
+    if args.rotate:
+        print(f"Frames rotated {args.rotate} degrees counter-clockwise")
+    scores = predict(session, resolved_paths, bboxes, args.batch_size, args.use_bbox_crop, args.margin, geometry,
+                     args.rotate)
     write_scores(args.output_csv, original_paths, labels, scores)
     print(f"Saved predictions to: {args.output_csv}")
 

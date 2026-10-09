@@ -244,6 +244,20 @@ python sagemaker_job/launch.py --config configs/train-gpu.json --freq-aug rescal
 
 They are recorded under `freq_aug` in `report.json`. On a laptop CPU they add about 2 ms per 512 px image, which is small next to decoding 4K JPEGs.
 
+### Orientation
+
+Most training attacks are landscape frames and most training lives are portrait; in production both are mostly portrait. After the squash to a square, frame orientation becomes a horizontal-vs-vertical frequency imbalance. The September 30 model (`runs/freq/1833`) used it as an attack cue: on production, 62% of landscape lives and 4% of landscape attacks were misclassified, against 11% and 14% in portrait. `--rot90-prob P` (config key `rot90_prob`) rotates each training frame a quarter turn, clockwise or counter-clockwise, with probability `P`. This happens after the bbox crop, so orientation no longer tracks the label. It is recorded as `rot90_prob` in `report.json`.
+
+```bash
+python sagemaker_job/launch.py --config configs/train-gpu.json --rot90-prob 0.5 --freq-aug ampmix:0.5
+```
+
+To check whether an existing model depends on orientation without retraining, re-score with every frame rotated. `predict_checkpoint_csv.py` and `predict_onnx_csv.py` take `--rotate 0|90|180|270` (counter-clockwise, after the bbox crop). If the model relies on orientation, portrait attacks should become easier to catch and portrait lives should start failing.
+
+```bash
+python predict_checkpoint_csv.py data/ProdTest-0.3.csv --checkpoint runs/x/best.keras --output-csv runs/x/prod_rot90.csv --rotate 90
+```
+
 `frequency_shortcuts.py` checks whether such a shortcut exists and whether a model uses it. It measures the network input exactly as validation sees it. A spectrum-only linear probe is fitted on train and scored on prod. A per-band, per-orientation effect size (attack − live) is computed for train and prod. With `--checkpoint`, it also reports the EER change on each split when one radial band is removed. A band that matters on the in-distribution test but not on prod is a band the model relies on that does not transfer.
 
 ```bash

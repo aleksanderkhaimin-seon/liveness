@@ -269,7 +269,7 @@ def collect_jobs(root: Path, region: str) -> list[dict]:
             eers = [
                 item.get("metrics", {}).get("eer")
                 for item in eval_report
-                if isinstance(item, dict)
+                if isinstance(item, dict) and not item.get("rotate")  # rotated re-scores are diagnostics
             ]
             eers = [value for value in eers if value is not None]
             if eers:

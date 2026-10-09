@@ -306,6 +306,7 @@ def build_hyperparameters(
         "use_bbox_crop",
         "margin",
         "bbox_aug_prob",
+        "rot90_prob",
         "cover_attack_datasets",
         "degrade",
         "augment",
@@ -334,6 +335,7 @@ def build_hyperparameters(
         "use_bbox_crop": args.use_bbox_crop,
         "margin": args.margin,
         "bbox_aug_prob": args.bbox_aug_prob,
+        "rot90_prob": getattr(args, "rot90_prob", None),
         "cover_attack_datasets": getattr(args, "cover_attack_datasets", None),
         "degrade": getattr(args, "degrade", None),
         "augment": getattr(args, "augment", None),
@@ -409,6 +411,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--margin", type=float)
     parser.add_argument("--bbox-aug-prob", type=float)
+    parser.add_argument("--rot90-prob", type=float, default=None,
+                        help="Probability of a quarter-turn rotation of each training frame. Overrides the config's rot90_prob.")
     parser.add_argument(
         "--degrade",
         default=None,

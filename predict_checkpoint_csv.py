@@ -134,6 +134,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--use-bbox-crop", action="store_true", help="Use bbox column crop before resize.")
     parser.add_argument("--margin", type=float, default=0.0)
+    parser.add_argument("--rotate", type=int, choices=(0, 90, 180, 270), default=0,
+                        help="Rotate every frame counter-clockwise by this many degrees after the bbox crop, "
+                        "e.g. to test whether the model depends on frame orientation.")
     parser.add_argument("--on-missing", choices=["skip", "raise"], default="skip")
     parser.add_argument("--require-gpu", action="store_true")
     parser.add_argument("--mixed-precision", action="store_true")
@@ -183,7 +186,10 @@ def main() -> None:
         training=False,
         use_bbox_crop=args.use_bbox_crop,
         margin=args.margin,
+        rotate=args.rotate,
     )
+    if args.rotate:
+        print(f"Frames rotated {args.rotate} degrees counter-clockwise")
     logits = model.predict(dataset).reshape(-1)
     scores = sigmoid_np(logits)
     write_scores(args.output_csv, original_paths, labels, scores)

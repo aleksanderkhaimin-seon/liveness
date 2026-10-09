@@ -171,6 +171,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eer-threshold", type=float, default=0.5)
     parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--margin", type=float, default=0.0)
+    parser.add_argument(
+        "--rotate",
+        type=int,
+        nargs="+",
+        choices=(0, 90, 180, 270),
+        default=[0],
+        help="Score every model once per rotation (degrees counter-clockwise, after the bbox crop), "
+        "e.g. --rotate 0 90 to test whether the model depends on frame orientation.",
+    )
     parser.add_argument("--on-missing", choices=["skip", "raise"], default="skip")
     parser.add_argument(
         "--device",
@@ -219,6 +228,7 @@ def main() -> None:
         "eer_threshold": str(args.eer_threshold),
         "use_bbox_crop": "true" if args.use_bbox_crop else "false",
         "margin": str(args.margin),
+        "rotate": ",".join(str(r) for r in dict.fromkeys(args.rotate)),
         "on_missing": args.on_missing,
         "device": args.device,
         "strip_path_prefix": "|".join(prefixes),

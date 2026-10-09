@@ -263,6 +263,7 @@ def main() -> None:
     use_bbox = smtrain.truthy(hps.get("use_bbox_crop", "false"))
     margin = smtrain.optional(hps, "margin") or "0.0"
     on_missing = smtrain.optional(hps, "on_missing") or "skip"
+    rotations = [int(value) for value in (smtrain.optional(hps, "rotate") or "0").split(",") if value.strip()]
 
     predict_script = SOURCE_ROOT / "predict_onnx_csv.py"
     reports = []
@@ -271,8 +272,9 @@ def main() -> None:
     models.extend((path, None) for path in onnx_files(hps))
     if not models:
         raise FileNotFoundError("No models to evaluate. Pass --onnx and/or --checkpoint.")
-    for model_path, artifacts in models:
-        stem = model_path.stem
+    runs = [(model_path, artifacts, rotate) for model_path, artifacts in models for rotate in rotations]
+    for model_path, artifacts, rotate in runs:
+        stem = model_path.stem + (f"_rot{rotate}" if rotate else "")
         pred_csv = OUTPUT_DIR / f"{stem}_predictions.csv"
         command = [
             sys.executable, "-u", str(predict_script),
@@ -283,6 +285,7 @@ def main() -> None:
             "--device", device,
             "--on-missing", on_missing,
             "--margin", str(margin),
+            "--rotate", str(rotate),
         ]
         if use_bbox:
             command.append("--use-bbox-crop")
@@ -297,6 +300,7 @@ def main() -> None:
             "model": str(model_path.name),
             "predictions": str(pred_csv),
             "samples": len(labels),
+            "rotate": rotate,
             "metrics": metrics,
         }
         if artifacts:

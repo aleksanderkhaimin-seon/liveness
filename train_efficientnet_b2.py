@@ -605,6 +605,33 @@ def amplitude_mix(images: tf.Tensor, labels: tf.Tensor) -> tuple[tf.Tensor, tf.T
     return tf.clip_by_value(tf.transpose(out, [0, 2, 3, 1]), 0.0, 255.0), labels
 
 
+# -- orientation ----------------------------------------------------------------
+#
+# Training attacks are mostly landscape frames and training lives mostly portrait;
+# production is mostly portrait for both. Squashed to the input square, the frame
+# orientation becomes a horizontal-vs-vertical frequency imbalance that the
+# 1833 model used as an attack cue (runs/freq/1833: prod landscape lives 62% wrong,
+# portrait lives 11%). ROT90_PROB (--rot90-prob, training only) rotates a frame a
+# quarter turn either way, after the bbox crop, so orientation stops tracking the
+# label. ROTATIONS is the fixed --rotate of the prediction scripts, used to test
+# whether a model depends on orientation without retraining.
+
+ROT90_PROB = 0.0
+ROTATIONS = (0, 90, 180, 270)
+
+
+def set_rot90_prob(prob: float) -> None:
+    global ROT90_PROB
+    if not 0.0 <= prob <= 1.0:
+        raise ValueError(f"rot90_prob must be in [0, 1], got {prob}")
+    ROT90_PROB = float(prob)
+
+
+def random_quarter_turn(image: tf.Tensor) -> tf.Tensor:
+    turns = tf.random.uniform((), 0, 2, dtype=tf.int32) * 2 + 1  # 1 or 3 quarter turns counter-clockwise
+    return tf.image.rot90(image, turns)
+
+
 def load_image(
     path: tf.Tensor,
     label: tf.Tensor,
@@ -613,6 +640,7 @@ def load_image(
     margin: float,
     bbox_aug_prob: float = 0.0,
     training: bool = False,
+    rotate: int = 0,
 ) -> tuple[tf.Tensor, tf.Tensor]:
     image = tf.io.read_file(path)
     image = tf.io.decode_image(image, channels=3, expand_animations=False)
@@ -628,6 +656,10 @@ def load_image(
         has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
         should_crop = tf.math.logical_and(has_bbox, tf.random.uniform(()) < bbox_aug_prob)
         image = tf.cond(should_crop, lambda: crop_by_bbox(image, bbox, margin), lambda: image)
+    if rotate:
+        image = tf.image.rot90(image, rotate // 90)  # counter-clockwise, like PIL ROTATE_90
+    if training and ROT90_PROB > 0.0:
+        image = tf.cond(tf.random.uniform(()) < ROT90_PROB, lambda: random_quarter_turn(image), lambda: image)
     if training and "rescale" in FREQ_AUG:
         prob = FREQ_AUG["rescale"][0]
         image = tf.cond(tf.random.uniform(()) < prob, lambda: random_rescale(image), lambda: image)
@@ -835,7 +867,13 @@ def make_dataset(
     datasets: list[str] | None = None,
     cover_attack_datasets: bool = False,
     seed: int = 0,
+    rotate: int = 0,
 ) -> tf.data.Dataset:
+    """`rotate`: fixed counter-clockwise rotation in degrees after the bbox crop, for re-scoring."""
+    if rotate not in ROTATIONS:
+        raise ValueError(f"rotate must be one of {ROTATIONS}, got {rotate}")
+    if rotate and training:
+        raise ValueError("rotate is for scoring; use rot90_prob to rotate training frames")
     if training and cover_attack_datasets:
         if datasets is None:
             raise ValueError("cover_attack_datasets requires a dataset name for every training row")
@@ -857,7 +895,8 @@ def make_dataset(
 
     aug_prob = bbox_aug_prob if training else 0.0
     dataset = dataset.map(
-        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, aug_prob, training=training),
+        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, aug_prob, training=training,
+                                             rotate=rotate),
         num_parallel_calls=AUTOTUNE,
     )
     if training:
@@ -1127,6 +1166,7 @@ CONFIG_DEFAULTS = {
     "use_bbox_crop": False,
     "margin": 0.0,
     "bbox_aug_prob": 0.0,
+    "rot90_prob": 0.0,
     "cover_attack_datasets": False,
     "degrade": "",
     "augment": "base",
@@ -1207,6 +1247,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=None, help="Crop images by CSV bbox column before resizing.")
     parser.add_argument("--margin", type=float, help="BBox crop margin percent. 5 expands by 5%%, -5 crops 5%% inside.")
     parser.add_argument("--bbox-aug-prob", type=float, help="Probability of applying bbox crop as augmentation during training (0.0 to disable).")
+    parser.add_argument(
+        "--rot90-prob",
+        type=float,
+        help="Probability of rotating a training frame a quarter turn (either way) after the bbox crop, so that "
+        "frame orientation stops tracking the label. 0 disables.",
+    )
     parser.add_argument(
         "--cover-attack-datasets",
         action=argparse.BooleanOptionalAction,
@@ -1352,6 +1398,12 @@ def main() -> None:
         FREQ_AUG.update(parse_freq_aug(args.freq_aug or ""))
     except ValueError as error:
         raise SystemExit(f"--freq-aug: {error}") from error
+    try:
+        set_rot90_prob(float(args.rot90_prob))
+    except ValueError as error:
+        raise SystemExit(f"--rot90-prob: {error}") from error
+    if ROT90_PROB:
+        print(f"Quarter-turn rotation of training frames: p={ROT90_PROB:g}")
     if FREQ_AUG:
         print("Frequency augmentations:", ", ".join(f"{kind}:{prob:g}" + (f":{param:g}" if kind == "ampmix" else "")
                                                     for kind, (prob, param) in FREQ_AUG.items()))
@@ -1521,6 +1573,7 @@ def main() -> None:
             "margin": args.margin,
             "aug_prob": args.bbox_aug_prob,
         },
+        "rot90_prob": ROT90_PROB,
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
         "freq_aug": [
             {"kind": kind, "prob": prob, **({"eta": param} if kind == "ampmix" else {})}

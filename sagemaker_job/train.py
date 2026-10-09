@@ -235,6 +235,7 @@ def build_command(hps: dict[str, str]) -> list[str]:
         "require_gpu": ("--require-gpu", "--no-require-gpu"),
         "mixed_precision": ("--mixed-precision", "--no-mixed-precision"),
         "use_bbox_crop": ("--use-bbox-crop", "--no-use-bbox-crop"),
+        "cover_attack_datasets": ("--cover-attack-datasets", "--no-cover-attack-datasets"),
     }
     for key, (on_flag, off_flag) in bool_flags.items():
         if key not in hps:

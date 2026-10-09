@@ -119,6 +119,7 @@ def stage_source(
 ) -> Path:
     stage = Path(tempfile.mkdtemp(prefix="liveness-sagemaker-eval-"))
     shutil.copy2(REPO_ROOT / "predict_onnx_csv.py", stage / "predict_onnx_csv.py")
+    shutil.copy2(REPO_ROOT / "input_geometry.py", stage / "input_geometry.py")
     shutil.copy2(REPO_ROOT / "eer.py", stage / "eer.py")
     shutil.copy2(REPO_ROOT / "convert_checkpoint_to_onnx.py", stage / "convert_checkpoint_to_onnx.py")
     shutil.copy2(REPO_ROOT / "train_efficientnet_b2.py", stage / "train_efficientnet_b2.py")

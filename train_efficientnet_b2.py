@@ -172,7 +172,11 @@ def normalize_bbox_value(raw_bbox: str, csv_path: Path, row_number: int, require
     return json.dumps([x1, y1, x2, y2], separators=(",", ":"))
 
 
-def read_csv_dataset(csv_path: Path, require_bbox: bool = False) -> tuple[list[str], list[int], list[str]]:
+def read_csv_dataset(
+    csv_path: Path,
+    require_bbox: bool = False,
+    with_dataset: bool = False,
+) -> tuple[list[str], list[int], list[str]] | tuple[list[str], list[int], list[str], list[str]]:
     if not csv_path.exists():
         raise FileNotFoundError(
             f"CSV file not found: {csv_path}. Expected columns: path,label"
@@ -181,6 +185,7 @@ def read_csv_dataset(csv_path: Path, require_bbox: bool = False) -> tuple[list[s
     image_paths = []
     labels = []
     bboxes = []
+    datasets = []
 
     with csv_path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
@@ -188,6 +193,10 @@ def read_csv_dataset(csv_path: Path, require_bbox: bool = False) -> tuple[list[s
             raise ValueError(f"{csv_path} must contain columns named path and label")
         if require_bbox and "bbox" not in reader.fieldnames:
             raise ValueError(f"{csv_path} must contain a bbox column when --use-bbox-crop is set")
+        if with_dataset and "dataset" not in reader.fieldnames:
+            raise ValueError(
+                f"{csv_path} must contain a dataset column when cover_attack_datasets is set"
+            )
 
         for row_number, row in enumerate(reader, start=2):
             raw_path = row["path"].strip()
@@ -213,6 +222,8 @@ def read_csv_dataset(csv_path: Path, require_bbox: bool = False) -> tuple[list[s
                     require_bbox=require_bbox,
                 )
             )
+            if with_dataset:
+                datasets.append((row.get("dataset") or "").strip() or "unknown")
 
     if not image_paths:
         raise ValueError(f"No rows found in {csv_path}")
@@ -234,6 +245,8 @@ def read_csv_dataset(csv_path: Path, require_bbox: bool = False) -> tuple[list[s
             file=sys.stderr,
         )
 
+    if with_dataset:
+        return image_paths, labels, bboxes, datasets
     return image_paths, labels, bboxes
 
 
@@ -500,6 +513,169 @@ def augment_image(image: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Ten
     return image, label
 
 
+def plan_attack_coverage_batches(
+    labels: list[int],
+    datasets: list[str],
+    batch_size: int,
+    seed: int,
+) -> np.ndarray:
+    """Row indices of shape (n_batches, batch_size).
+
+    Every batch contains one label-1 row from each dataset that has attacks.
+    Remaining slots stay half live and half attack when that many attack
+    datasets fit in half the batch. The tail that does not fill a batch is
+    dropped so every step has the full set of attack datasets.
+    """
+    if batch_size < 2:
+        raise ValueError(f"batch_size must be at least 2, got {batch_size}")
+    labels_array = np.asarray(labels, dtype=np.int32)
+    dataset_array = np.asarray(datasets)
+    if len(labels_array) != len(dataset_array):
+        raise ValueError("labels and datasets must have the same length")
+
+    attack_names = sorted(
+        {str(name) for name, label in zip(dataset_array, labels_array) if int(label) == 1}
+    )
+    if not attack_names:
+        raise ValueError("cover_attack_datasets needs at least one label-1 row")
+    if len(attack_names) > batch_size:
+        raise ValueError(
+            f"{len(attack_names)} attack datasets do not fit in a batch of {batch_size}"
+        )
+
+    n_batches = len(labels_array) // batch_size
+    if n_batches < 1:
+        raise ValueError(
+            f"Need at least {batch_size} rows to form one covered batch, got {len(labels_array)}"
+        )
+
+    target_attacks = batch_size // 2
+    n_extra_attacks = max(0, target_attacks - len(attack_names))
+    n_lives = batch_size - len(attack_names) - n_extra_attacks
+
+    rng = np.random.default_rng(seed)
+    groups: dict[str, np.ndarray] = {}
+    for name in attack_names:
+        idx = np.flatnonzero((labels_array == 1) & (dataset_array == name)).copy()
+        rng.shuffle(idx)
+        groups[name] = idx
+    attack_pool = np.flatnonzero(labels_array == 1).copy()
+    live_pool = np.flatnonzero(labels_array == 0).copy()
+    rng.shuffle(attack_pool)
+    rng.shuffle(live_pool)
+    if n_lives > 0 and len(live_pool) == 0:
+        raise ValueError("cover_attack_datasets needs label-0 rows to fill the live slots")
+
+    group_pos = {name: 0 for name in attack_names}
+    attack_pos = 0
+    live_pos = 0
+    batches = np.empty((n_batches, batch_size), dtype=np.int64)
+
+    def take(pool: np.ndarray, pos: int, count: int, used: set[int]) -> tuple[list[int], int]:
+        picked: list[int] = []
+        if count <= 0 or len(pool) == 0:
+            return picked, pos
+        scanned = 0
+        while len(picked) < count and scanned < len(pool):
+            item = int(pool[pos % len(pool)])
+            pos += 1
+            scanned += 1
+            if item in used:
+                continue
+            used.add(item)
+            picked.append(item)
+        return picked, pos
+
+    for batch_index in range(n_batches):
+        used: set[int] = set()
+        chosen: list[int] = []
+        for name in attack_names:
+            idx = groups[name]
+            if group_pos[name] > 0 and group_pos[name] % len(idx) == 0:
+                rng.shuffle(idx)
+            pick = int(idx[group_pos[name] % len(idx)])
+            group_pos[name] += 1
+            if pick in used:
+                raise ValueError(f"attack dataset {name!r} repeated inside one batch")
+            used.add(pick)
+            chosen.append(pick)
+        extra, attack_pos = take(attack_pool, attack_pos, n_extra_attacks, used)
+        chosen.extend(extra)
+        lives, live_pos = take(live_pool, live_pos, batch_size - len(chosen), used)
+        chosen.extend(lives)
+        if len(chosen) != batch_size:
+            raise ValueError(
+                f"Could not fill a batch of {batch_size} with one attack from each of "
+                f"{len(attack_names)} datasets (got {len(chosen)} rows). "
+                "A class is too small for this batch size."
+            )
+        rng.shuffle(chosen)
+        batches[batch_index] = chosen
+    return batches
+
+
+def describe_attack_coverage(labels: list[int], datasets: list[str], batch_size: int) -> str:
+    labels_array = np.asarray(labels, dtype=np.int32)
+    dataset_array = np.asarray(datasets)
+    names = sorted({str(name) for name, label in zip(dataset_array, labels_array) if int(label) == 1})
+    n_batches = len(labels_array) // batch_size
+    n_extra = max(0, batch_size // 2 - len(names))
+    n_lives = batch_size - len(names) - n_extra
+    lines = [
+        f"Attack-dataset batches: {len(names)} datasets, 1 attack from each, "
+        f"plus {n_extra} other attacks and {n_lives} lives; "
+        f"{n_batches} steps of {batch_size}",
+    ]
+    for name in names:
+        count = int(np.sum((labels_array == 1) & (dataset_array == name)))
+        lines.append(
+            f"  {name}: {count} attacks, about {n_batches / count:.1f} uses of each image per epoch"
+        )
+    return "\n".join(lines)
+
+
+def make_attack_coverage_dataset(
+    paths: list[str],
+    labels: list[int],
+    bboxes: list[str],
+    datasets: list[str],
+    batch_size: int,
+    use_bbox_crop: bool,
+    margin: float,
+    bbox_aug_prob: float,
+    seed: int,
+) -> tf.data.Dataset:
+    """Infinite dataset. Each epoch is a fresh plan; fit must set steps_per_epoch."""
+    n_batches = len(paths) // batch_size
+    epoch_length = n_batches * batch_size
+    path_t = tf.constant(paths)
+    label_t = tf.constant(labels, dtype=tf.int32)
+    bbox_t = tf.constant(bboxes)
+
+    def epochs():
+        epoch_seed = seed
+        while True:
+            plan = plan_attack_coverage_batches(labels, datasets, batch_size, epoch_seed)
+            epoch_seed += 1
+            yield plan.reshape(-1).astype(np.int64)
+
+    index_ds = tf.data.Dataset.from_generator(
+        epochs,
+        output_signature=tf.TensorSpec(shape=(epoch_length,), dtype=tf.int64),
+    )
+    dataset = index_ds.flat_map(tf.data.Dataset.from_tensor_slices)
+    dataset = dataset.map(
+        lambda index: (path_t[index], label_t[index], bbox_t[index]),
+        num_parallel_calls=AUTOTUNE,
+    )
+    dataset = dataset.map(
+        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, bbox_aug_prob),
+        num_parallel_calls=AUTOTUNE,
+    )
+    dataset = dataset.map(augment_image, num_parallel_calls=AUTOTUNE)
+    return dataset.batch(batch_size, drop_remainder=True).prefetch(AUTOTUNE)
+
+
 def make_dataset(
     paths: list[str],
     labels: list[int],
@@ -509,7 +685,25 @@ def make_dataset(
     use_bbox_crop: bool,
     margin: float,
     bbox_aug_prob: float = 0.0,
+    datasets: list[str] | None = None,
+    cover_attack_datasets: bool = False,
+    seed: int = 0,
 ) -> tf.data.Dataset:
+    if training and cover_attack_datasets:
+        if datasets is None:
+            raise ValueError("cover_attack_datasets requires a dataset name for every training row")
+        return make_attack_coverage_dataset(
+            paths,
+            labels,
+            bboxes,
+            datasets,
+            batch_size,
+            use_bbox_crop,
+            margin,
+            bbox_aug_prob,
+            seed,
+        )
+
     dataset = tf.data.Dataset.from_tensor_slices((paths, labels, bboxes))
     if training:
         dataset = dataset.shuffle(buffer_size=len(paths), reshuffle_each_iteration=True)
@@ -765,6 +959,7 @@ BOOL_KEYS = (
     "require_gpu",
     "mixed_precision",
     "use_bbox_crop",
+    "cover_attack_datasets",
 )
 CONFIG_DEFAULTS = {
     "csv": Path("test_df.csv"),
@@ -785,6 +980,7 @@ CONFIG_DEFAULTS = {
     "use_bbox_crop": False,
     "margin": 0.0,
     "bbox_aug_prob": 0.0,
+    "cover_attack_datasets": False,
     "degrade": "",
     "augment": "base",
     "checkpoint_monitor": "val_eer",
@@ -863,6 +1059,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=None, help="Crop images by CSV bbox column before resizing.")
     parser.add_argument("--margin", type=float, help="BBox crop margin percent. 5 expands by 5%%, -5 crops 5%% inside.")
     parser.add_argument("--bbox-aug-prob", type=float, help="Probability of applying bbox crop as augmentation during training (0.0 to disable).")
+    parser.add_argument(
+        "--cover-attack-datasets",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Every training batch includes one attack from each dataset that has label-1 rows.",
+    )
     parser.add_argument(
         "--degrade",
         type=str,
@@ -1005,12 +1207,22 @@ def main() -> None:
                 f"{args.degrade!r} needs one for every row"
             )
 
-    paths, labels, bboxes = read_csv_dataset(args.csv, require_bbox=require_bbox)
+    loaded = read_csv_dataset(
+        args.csv,
+        require_bbox=require_bbox,
+        with_dataset=args.cover_attack_datasets,
+    )
+    if args.cover_attack_datasets:
+        paths, labels, bboxes, datasets = loaded
+    else:
+        paths, labels, bboxes = loaded
+        datasets = None
     check_degrade_bboxes(args.csv, bboxes)
     if args.validation_csv:
         train_paths = paths
         train_labels = labels
         train_bboxes = bboxes
+        train_datasets = datasets
         validation_paths, validation_labels, validation_bboxes = read_csv_dataset(
             args.validation_csv,
             require_bbox=require_bbox,
@@ -1022,11 +1234,14 @@ def main() -> None:
         train_paths = [paths[index] for index in train_indices]
         train_labels = [labels[index] for index in train_indices]
         train_bboxes = [bboxes[index] for index in train_indices]
+        train_datasets = [datasets[index] for index in train_indices] if datasets is not None else None
         validation_paths = [paths[index] for index in validation_indices]
         validation_labels = [labels[index] for index in validation_indices]
         validation_bboxes = [bboxes[index] for index in validation_indices]
         validation_csv = None
 
+    if args.cover_attack_datasets:
+        print(describe_attack_coverage(train_labels, train_datasets, args.batch_size))
     train_dataset = make_dataset(
         train_paths,
         train_labels,
@@ -1036,6 +1251,9 @@ def main() -> None:
         use_bbox_crop=args.use_bbox_crop,
         margin=args.margin,
         bbox_aug_prob=args.bbox_aug_prob,
+        datasets=train_datasets,
+        cover_attack_datasets=args.cover_attack_datasets,
+        seed=args.seed,
     )
     validation_dataset = make_dataset(
         validation_paths,
@@ -1069,7 +1287,10 @@ def main() -> None:
         margin=args.margin,
     )
 
-    train_steps_per_epoch = int(np.ceil(len(train_paths) / args.batch_size))
+    if args.cover_attack_datasets:
+        train_steps_per_epoch = len(train_paths) // args.batch_size
+    else:
+        train_steps_per_epoch = int(np.ceil(len(train_paths) / args.batch_size))
     decay_steps = train_steps_per_epoch * args.epochs
     learning_rate = build_learning_rate(
         learning_rate=args.learning_rate,
@@ -1094,6 +1315,7 @@ def main() -> None:
         train_dataset,
         validation_data=validation_dataset,
         epochs=args.epochs,
+        steps_per_epoch=train_steps_per_epoch if args.cover_attack_datasets else None,
         callbacks=callbacks,
         class_weight=class_weight(train_labels),
     )

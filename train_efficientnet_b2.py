@@ -473,6 +473,138 @@ def apply_degradations(image: tf.Tensor, bbox: tf.Tensor) -> tf.Tensor:
     return image
 
 
+# -- frequency-shortcut augmentations (training only) --------------------------
+#
+# In the training manifests the label is the source: lives are phone photos
+# (mostly 3024x4032) and scraped web images, attacks are replay captures
+# (mostly 1920x1080 frames). Whatever fingerprints the capture pipeline --
+# the resampling ratio down to the network input, JPEG history, sensor noise
+# and sharpening, the overall spectral envelope -- separates the classes in
+# training and means nothing in production, where both classes arrive through
+# the same ~1920 px pipeline. These transforms make such cues unreliable. They
+# never run on validation, test or inference. Set once from --freq-aug.
+#
+#   rescale:P        area-downsample the (cropped) frame so its long side is
+#                    log-uniform in [IMAGE_SIZE, 4 x IMAGE_SIZE] (never upsample),
+#                    then re-encode as JPEG at quality 60-95. The final resize to
+#                    the network input then runs at a ratio unrelated to the
+#                    source resolution.
+#   bandstop:P       attenuate a random ring of the network input's spectrum
+#                    (centre 0.1-1.0 of Nyquist, width 0.05-0.3, depth 50-100%)
+#                    so that no single band can carry the decision.
+#   ampmix:P[:ETA]   per batch: mix each image's Fourier amplitude with that of
+#                    a random image of the other class, keeping its own phase:
+#                    amplitude = (1 - l) own + l other, l ~ U(0, ETA), ETA 0.5 by
+#                    default. The spectral envelope stops being a class property;
+#                    structure (edges, moire geometry, bezels) lives in the phase.
+#
+# Example: --freq-aug rescale:0.5,bandstop:0.3,ampmix:0.5
+
+FREQ_AUG_KINDS = ("rescale", "bandstop", "ampmix")
+FREQ_AUG: dict[str, tuple[float, float]] = {}
+
+
+def parse_freq_aug(text: str) -> dict[str, tuple[float, float]]:
+    specs: dict[str, tuple[float, float]] = {}
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        kind, *values = [part.strip() for part in item.split(":")]
+        kind = kind.lower()
+        if kind not in FREQ_AUG_KINDS:
+            raise ValueError(f"Unknown frequency augmentation {kind!r}; expected one of {FREQ_AUG_KINDS}")
+        if kind in specs:
+            raise ValueError(f"{kind} given twice")
+        if not values or len(values) > (2 if kind == "ampmix" else 1):
+            raise ValueError(f"{item!r}: expected {kind}:P" + ("[:ETA]" if kind == "ampmix" else ""))
+        try:
+            numbers = [float(value) for value in values]
+        except ValueError as error:
+            raise ValueError(f"{item!r} needs numeric values, e.g. {kind}:0.5") from error
+        prob = numbers[0]
+        if not 0.0 < prob <= 1.0:
+            raise ValueError(f"{kind} probability must be in (0, 1], got {prob}")
+        param = numbers[1] if len(numbers) > 1 else 0.5
+        if kind == "ampmix" and not 0.0 < param <= 1.0:
+            raise ValueError(f"ampmix ETA must be in (0, 1], got {param}")
+        specs[kind] = (prob, param)
+    return specs
+
+
+def random_rescale(image: tf.Tensor) -> tf.Tensor:
+    shape = tf.shape(image)
+    height = tf.cast(shape[0], tf.float32)
+    width = tf.cast(shape[1], tf.float32)
+    target = tf.exp(tf.random.uniform((), math.log(IMAGE_SIZE), math.log(4 * IMAGE_SIZE)))
+    scale = target / tf.maximum(height, width)
+
+    def shrink() -> tf.Tensor:
+        size = tf.maximum(1, tf.cast(tf.round(tf.stack([height, width]) * scale), tf.int32))
+        return tf.image.resize(image, size, method="area")
+
+    resized = tf.cond(scale < 1.0, shrink, lambda: tf.cast(image, tf.float32))
+    resized = tf.cast(tf.clip_by_value(tf.round(resized), 0.0, 255.0), tf.uint8)
+    quality = tf.random.uniform((), 60, 96, dtype=tf.int32)
+    recoded = tf.image.adjust_jpeg_quality(resized, quality)
+    recoded = tf.ensure_shape(recoded, [None, None, 3])
+    return tf.cast(recoded, image.dtype)
+
+
+def radial_frequency(size: int) -> np.ndarray:
+    """|f| / Nyquist on the rfft2d grid of a size x size image, shape (size, size // 2 + 1)."""
+    fy = np.fft.fftfreq(size)[:, np.newaxis]
+    fx = np.fft.rfftfreq(size)[np.newaxis, :]
+    return (np.sqrt(fy**2 + fx**2) / 0.5).astype(np.float32)
+
+
+def apply_spectral_gain(images: tf.Tensor, gain: tf.Tensor) -> tf.Tensor:
+    """Multiply the 2-D spectrum of (B, H, W, C) images by a real gain on the rfft2d grid.
+
+    `gain` broadcasts against (B, C, H, W // 2 + 1). Output is clipped to [0, 255].
+    """
+    channels_first = tf.transpose(tf.cast(images, tf.float32), [0, 3, 1, 2])
+    spectrum = tf.signal.rfft2d(channels_first) * tf.cast(gain, tf.complex64)
+    filtered = tf.signal.irfft2d(spectrum, fft_length=tf.shape(channels_first)[2:])
+    return tf.clip_by_value(tf.transpose(filtered, [0, 2, 3, 1]), 0.0, 255.0)
+
+
+def random_bandstop(image: tf.Tensor) -> tf.Tensor:
+    rho = tf.constant(radial_frequency(IMAGE_SIZE))
+    centre = tf.random.uniform((), 0.1, 1.0)
+    half_width = tf.random.uniform((), 0.025, 0.15)
+    depth = tf.random.uniform((), 0.5, 1.0)
+    # Raised-cosine notch: full depth at the centre, back to 1 at centre +- half_width.
+    t = tf.clip_by_value((rho - centre) / half_width, -1.0, 1.0)
+    gain = 1.0 - depth * 0.5 * (1.0 + tf.cos(math.pi * t))
+    return apply_spectral_gain(image[tf.newaxis], gain)[0]
+
+
+def opposite_class_partner(labels: tf.Tensor) -> tf.Tensor:
+    """For each batch row, a random row of the other label (any other row if the batch has one label)."""
+    labels = tf.reshape(tf.cast(labels, tf.int32), [-1])
+    batch = tf.shape(labels)[0]
+    same = tf.equal(labels[:, tf.newaxis], labels[tf.newaxis, :])
+    noise = tf.random.uniform([batch, batch])
+    opposite = tf.argmax(tf.where(same, -1.0, noise), axis=1, output_type=tf.int32)
+    other = tf.argmax(tf.where(tf.eye(batch, dtype=tf.bool), -1.0, noise), axis=1, output_type=tf.int32)
+    return tf.where(tf.reduce_any(~same, axis=1), opposite, other)
+
+
+def amplitude_mix(images: tf.Tensor, labels: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+    prob, eta = FREQ_AUG["ampmix"]
+    batch = tf.shape(images)[0]
+    channels_first = tf.transpose(images, [0, 3, 1, 2])
+    spectrum = tf.signal.rfft2d(channels_first)
+    amplitude = tf.abs(spectrum)
+    applied = tf.cast(tf.random.uniform([batch, 1, 1, 1]) < prob, tf.float32)
+    weight = tf.random.uniform([batch, 1, 1, 1], 0.0, eta) * applied
+    mixed = (1.0 - weight) * amplitude + weight * tf.gather(amplitude, opposite_class_partner(labels))
+    spectrum = spectrum * tf.cast(tf.math.divide_no_nan(mixed, amplitude), tf.complex64)
+    out = tf.signal.irfft2d(spectrum, fft_length=tf.shape(channels_first)[2:])
+    return tf.clip_by_value(tf.transpose(out, [0, 2, 3, 1]), 0.0, 255.0), labels
+
+
 def load_image(
     path: tf.Tensor,
     label: tf.Tensor,
@@ -480,6 +612,7 @@ def load_image(
     use_bbox_crop: bool,
     margin: float,
     bbox_aug_prob: float = 0.0,
+    training: bool = False,
 ) -> tuple[tf.Tensor, tf.Tensor]:
     image = tf.io.read_file(path)
     image = tf.io.decode_image(image, channels=3, expand_animations=False)
@@ -495,6 +628,9 @@ def load_image(
         has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
         should_crop = tf.math.logical_and(has_bbox, tf.random.uniform(()) < bbox_aug_prob)
         image = tf.cond(should_crop, lambda: crop_by_bbox(image, bbox, margin), lambda: image)
+    if training and "rescale" in FREQ_AUG:
+        prob = FREQ_AUG["rescale"][0]
+        image = tf.cond(tf.random.uniform(()) < prob, lambda: random_rescale(image), lambda: image)
     image = fit_to_input(image)
     image = tf.cast(image, tf.float32)
     label = tf.cast(label, tf.float32)
@@ -510,7 +646,19 @@ def augment_image_np(image: np.ndarray) -> np.ndarray:
 def augment_image(image: tf.Tensor, label: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
     image = tf.numpy_function(augment_image_np, [image], tf.float32)
     image.set_shape((IMAGE_SIZE, IMAGE_SIZE, 3))
+    if "bandstop" in FREQ_AUG:
+        prob = FREQ_AUG["bandstop"][0]
+        image = tf.cond(tf.random.uniform(()) < prob, lambda: random_bandstop(image), lambda: image)
     return image, label
+
+
+def batch_training(dataset: tf.data.Dataset, batch_size: int, drop_remainder: bool) -> tf.data.Dataset:
+    """Per-image augmentation, batching, then the batch-level amplitude mix."""
+    dataset = dataset.map(augment_image, num_parallel_calls=AUTOTUNE)
+    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
+    if "ampmix" in FREQ_AUG:
+        dataset = dataset.map(amplitude_mix, num_parallel_calls=AUTOTUNE)
+    return dataset.prefetch(AUTOTUNE)
 
 
 def plan_attack_coverage_batches(
@@ -669,11 +817,10 @@ def make_attack_coverage_dataset(
         num_parallel_calls=AUTOTUNE,
     )
     dataset = dataset.map(
-        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, bbox_aug_prob),
+        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, bbox_aug_prob, training=True),
         num_parallel_calls=AUTOTUNE,
     )
-    dataset = dataset.map(augment_image, num_parallel_calls=AUTOTUNE)
-    return dataset.batch(batch_size, drop_remainder=True).prefetch(AUTOTUNE)
+    return batch_training(dataset, batch_size, drop_remainder=True)
 
 
 def make_dataset(
@@ -710,11 +857,11 @@ def make_dataset(
 
     aug_prob = bbox_aug_prob if training else 0.0
     dataset = dataset.map(
-        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, aug_prob),
+        lambda path, label, bbox: load_image(path, label, bbox, use_bbox_crop, margin, aug_prob, training=training),
         num_parallel_calls=AUTOTUNE,
     )
     if training:
-        dataset = dataset.map(augment_image, num_parallel_calls=AUTOTUNE)
+        return batch_training(dataset, batch_size, drop_remainder=False)
     dataset = dataset.batch(batch_size).prefetch(AUTOTUNE)
     return dataset
 
@@ -983,6 +1130,7 @@ CONFIG_DEFAULTS = {
     "cover_attack_datasets": False,
     "degrade": "",
     "augment": "base",
+    "freq_aug": "",
     "checkpoint_monitor": "val_eer",
     "image_size": 512,
     "resize_mode": "squash",
@@ -1081,6 +1229,14 @@ def parse_args() -> argparse.Namespace:
         "data and EER is the metric acted on; val_auc peaked at epoch 0 in most runs while EER did not.",
     )
     parser.add_argument("--augment", choices=sorted(AUGMENT_PRESETS), help="Training augmentation preset: base (flip/affine/noise) or domain (adds photometric, blur, noise, JPEG, perspective, shadow).")
+    parser.add_argument(
+        "--freq-aug",
+        type=str,
+        help="Comma-separated training-only frequency augmentations against capture-pipeline shortcuts: "
+        "rescale:P (random intermediate resolution + JPEG before the network resize), bandstop:P (attenuate "
+        "a random spectral ring), ampmix:P[:ETA] (mix Fourier amplitude with an image of the other class, "
+        "keep phase). E.g. rescale:0.5,bandstop:0.3,ampmix:0.5",
+    )
     parser.add_argument("--image-size", type=int, help="Network input side in px (default 512). Exported doc:96 frames are ~170-210 px.")
     parser.add_argument(
         "--resize-mode",
@@ -1191,6 +1347,14 @@ def main() -> None:
         raise SystemExit(f"--degrade: {error}") from error
     if DEGRADATIONS:
         print("Degradations:", ", ".join(f"{kind}:{value:g}" for kind, value in DEGRADATIONS))
+    try:
+        FREQ_AUG.clear()
+        FREQ_AUG.update(parse_freq_aug(args.freq_aug or ""))
+    except ValueError as error:
+        raise SystemExit(f"--freq-aug: {error}") from error
+    if FREQ_AUG:
+        print("Frequency augmentations:", ", ".join(f"{kind}:{prob:g}" + (f":{param:g}" if kind == "ampmix" else "")
+                                                    for kind, (prob, param) in FREQ_AUG.items()))
     degrade_needs_bbox = any(kind in ("mask", "pixelate", "downscale_doc") for kind, _ in DEGRADATIONS)
     require_bbox = args.use_bbox_crop or degrade_needs_bbox
 
@@ -1358,6 +1522,10 @@ def main() -> None:
             "aug_prob": args.bbox_aug_prob,
         },
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
+        "freq_aug": [
+            {"kind": kind, "prob": prob, **({"eta": param} if kind == "ampmix" else {})}
+            for kind, (prob, param) in FREQ_AUG.items()
+        ],
         "input": {"image_size": IMAGE_SIZE, "resize_mode": RESIZE_MODE},
         "throughput": {
             "train_seconds_per_epoch": [round(v, 1) for v in timing.train_seconds],

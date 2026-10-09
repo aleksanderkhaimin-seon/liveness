@@ -309,6 +309,7 @@ def build_hyperparameters(
         "cover_attack_datasets",
         "degrade",
         "augment",
+        "freq_aug",
         "checkpoint_monitor",
         "image_size",
         "resize_mode",
@@ -336,6 +337,7 @@ def build_hyperparameters(
         "cover_attack_datasets": getattr(args, "cover_attack_datasets", None),
         "degrade": getattr(args, "degrade", None),
         "augment": getattr(args, "augment", None),
+        "freq_aug": getattr(args, "freq_aug", None),
         "checkpoint_monitor": getattr(args, "checkpoint_monitor", None),
         "image_size": getattr(args, "image_size", None),
         "resize_mode": getattr(args, "resize_mode", None),
@@ -415,6 +417,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--augment", default=None, choices=("base", "domain"),
                         help="Training augmentation preset (training default: base).")
+    parser.add_argument("--freq-aug", default=None,
+                        help="Training-only frequency augmentations, e.g. rescale:0.5,bandstop:0.3,ampmix:0.5. "
+                        "Overrides the config's freq_aug key.")
     parser.add_argument("--checkpoint-monitor", default=None, choices=("val_eer", "val_auc", "val_loss", "val_acer"),
                         help="Validation metric selecting best.keras (training default: val_eer).")
     parser.add_argument("--image-size", type=int, default=None, help="Network input side in px (training default 512).")

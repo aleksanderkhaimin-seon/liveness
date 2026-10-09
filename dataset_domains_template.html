@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dataset domains</title>
+<!-- Template for dataset_domains.py report; the script replaces the DATA placeholder below. -->
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11, 11, 11, 0.10); --wash: rgba(11, 11, 11, 0.04);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --neutral: #5f5e5a; --dim: #c9c7c0;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  --div-neg: #2a78d6; --div-mid: #f0efec; --div-pos: #e34948;
+  --seq: #cde2fb, #9ec5f4, #6da7ec, #3987e5, #256abf, #184f95, #0d366b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.05);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --neutral: #c3c2b7; --dim: #3a3a37;
+    --div-neg: #3987e5; --div-mid: #383835; --div-pos: #e66767;
+    --seq: #184f95, #1c5cab, #256abf, #3987e5, #6da7ec, #9ec5f4, #cde2fb;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.05);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --neutral: #c3c2b7; --dim: #3a3a37;
+  --div-neg: #3987e5; --div-mid: #383835; --div-pos: #e66767;
+  --seq: #184f95, #1c5cab, #256abf, #3987e5, #6da7ec, #9ec5f4, #cde2fb;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1320px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+h2 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+.sub { color: var(--ink-2); margin: 0; }
+.note { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; }
+section { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; margin-top: 16px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-top: 16px; }
+.kpi { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 12px 14px; }
+.kpi .v { font-size: 26px; font-weight: 600; }
+.kpi .l { color: var(--ink-2); font-size: 12.5px; }
+.findings { list-style: none; margin: 8px 0 0; padding: 0; }
+.findings li { display: grid; grid-template-columns: 96px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid var(--grid); align-items: baseline; }
+.findings li:first-child { border-top: 0; }
+.chip { justify-self: start; display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--ring); color: var(--ink-2); white-space: nowrap; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin: 10px 0 12px; }
+.seg { display: inline-flex; border: 1px solid var(--ring); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: transparent; color: var(--ink-2); padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--ring); }
+.seg button[aria-pressed="true"] { background: var(--wash); color: var(--ink); font-weight: 600; }
+.seg button:disabled { opacity: .4; cursor: default; }
+.ctl-label { color: var(--muted); font-size: 12px; margin-right: 6px; }
+label.check { color: var(--ink-2); font-size: 13px; display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+.map-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; }
+@media (max-width: 860px) { .map-wrap { grid-template-columns: minmax(0, 1fr); } }
+.canvas-box { position: relative; border: 1px solid var(--grid); border-radius: 8px; overflow: hidden; touch-action: none; }
+canvas { display: block; width: 100%; cursor: crosshair; }
+.map-hint { position: absolute; right: 8px; bottom: 6px; font-size: 11px; color: var(--muted); pointer-events: none; }
+.legend { font-size: 13px; max-height: 640px; overflow: auto; }
+.legend h3 { font-size: 12px; color: var(--muted); font-weight: 600; margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+.legend .row { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 6px; cursor: pointer; }
+.legend .row:hover { background: var(--wash); }
+.legend .row.sel { background: var(--wash); font-weight: 600; }
+.legend .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend .cnt { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+.sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.sw.tri { border-radius: 0; width: 0; height: 0; background: none !important; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid currentColor; }
+.ramp { height: 10px; border-radius: 3px; margin: 4px 0 2px; }
+.ramp-l { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; }
+.tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 360px; z-index: 10; display: none; }
+.tip b { font-weight: 600; }
+.tip .m { color: var(--ink-2); }
+.table-box { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--ink-2); font-weight: 600; font-size: 12px; border-top: 0; white-space: nowrap; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--ink); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td .m { color: var(--muted); }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: var(--wash); }
+tr.sel td { background: var(--wash); }
+.bar { position: relative; height: 8px; background: var(--grid); border-radius: 4px; min-width: 80px; }
+.bar > span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--s1); }
+.stack { display: flex; gap: 2px; height: 10px; min-width: 120px; }
+.stack > span { border-radius: 2px; }
+.status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.status i { font-style: normal; font-size: 11px; }
+.thumbs { display: flex; gap: 4px; flex-wrap: nowrap; }
+.thumbs figure { margin: 0; }
+.thumbs img { height: 56px; border-radius: 4px; display: block; outline: 2px solid transparent; }
+.thumbs img.prod { outline-color: var(--s2); }
+select { font: inherit; font-size: 13px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--ring); background: var(--surface); color: var(--ink); }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+dl.defs { display: grid; grid-template-columns: 140px 1fr; gap: 6px 14px; margin: 8px 0 0; font-size: 13px; }
+dl.defs dt { font-weight: 600; }
+dl.defs dd { margin: 0; color: var(--ink-2); }
+@media (max-width: 600px) { dl.defs, .findings li { grid-template-columns: 1fr; gap: 4px; } }
+.heat-box { overflow-x: auto; }
+.heat text { fill: var(--ink-2); font-size: 11px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Dataset domains</h1>
+    <p class="sub" id="subtitle"></p>
+  </header>
+  <div class="kpis" id="kpis"></div>
+
+  <section>
+    <h2>Findings</h2>
+    <p class="note">Measured on the sampled embeddings; thresholds are in “How to read” at the bottom.</p>
+    <ul class="findings" id="findings"></ul>
+  </section>
+
+  <section>
+    <h2>Map</h2>
+    <p class="note" id="map-note"></p>
+    <div class="controls">
+      <span><span class="ctl-label">Colour</span><span class="seg" id="ctl-color"></span></span>
+      <span><span class="ctl-label">Label</span><span class="seg" id="ctl-label"></span></span>
+      <span id="ctl-roles"></span>
+      <label class="check"><input type="checkbox" id="ctl-clusters" checked> region numbers</label>
+    </div>
+    <div class="map-wrap">
+      <div class="canvas-box" id="canvas-box">
+        <canvas id="map" aria-label="2D map of all embedded samples"></canvas>
+        <div class="map-hint">scroll to zoom · drag to pan · double-click to reset</div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Domains</h2>
+    <p class="note">One row per domain and label. Click a row to focus it on the map; click a header to sort.</p>
+    <div class="table-box"><table id="domains"></table></div>
+  </section>
+
+  <section id="breakdown-section">
+    <h2>Production coverage by metadata</h2>
+    <p class="note">Production samples grouped by a manifest column; sorted by how many sit where train has almost no data.</p>
+    <div class="controls">
+      <span><span class="ctl-label">Column</span><select id="bd-col"></select></span>
+      <span><span class="ctl-label">Label</span><span class="seg" id="bd-label"></span></span>
+    </div>
+    <div class="table-box"><table id="breakdown"></table></div>
+  </section>
+
+  <section>
+    <h2>Regions</h2>
+    <p class="note">KMeans clusters of the embedding. Click a row to highlight the region on the map.</p>
+    <div class="table-box"><table id="clusters"></table></div>
+  </section>
+
+  <section>
+    <h2>Domain affinity</h2>
+    <p class="note">Row cell’s neighbours that fall in the column cell, over the number expected if everything were mixed (log₂). Red: closer than chance; blue: avoided. Ordered by similarity.</p>
+    <div id="heat-legend"></div>
+    <div class="heat-box"><svg class="heat" id="heat"></svg></div>
+    <details><summary>Table view</summary><div class="table-box"><table id="heat-table"></table></div></details>
+  </section>
+
+  <section>
+    <h2>How to read</h2>
+    <dl class="defs" id="defs"></dl>
+    <details><summary>Sources</summary><div class="table-box"><table id="sources"></table></div></details>
+  </section>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+const D = /*__DATA__*/null;
+const ROLES = ['prod', 'train', 'test', 'candidate'];
+const P = D.points, CELLS = D.cells, N = P.x.length;
+const $ = (id) => document.getElementById(id);
+const tok = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '—' : Number(v).toFixed(d);
+const pct = (v) => (v === null || v === undefined) ? '—' : `${Math.round(v * 100)}%`;
+const int = (v) => (v === null || v === undefined) ? '—' : Number(v).toLocaleString('en-US');
+
+function hexRgb(h) { h = h.replace('#', ''); return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)); }
+function mix(a, b, t) { const A = hexRgb(a), B = hexRgb(b); return `rgb(${A.map((x, i) => Math.round(x + (B[i] - x) * t)).join(',')})`; }
+function seq(t) {
+  const steps = tok('--seq').split(',').map((s) => s.trim());
+  t = Math.max(0, Math.min(1, t)); const f = t * (steps.length - 1); const i = Math.min(Math.floor(f), steps.length - 2);
+  return mix(steps[i], steps[i + 1], f - i);
+}
+function diverging(v, lim = 3) {
+  const t = Math.max(-1, Math.min(1, v / lim));
+  return t < 0 ? mix(tok('--div-mid'), tok('--div-neg'), -t) : mix(tok('--div-mid'), tok('--div-pos'), t);
+}
+const roleColor = (r) => ({prod: tok('--s2'), train: tok('--s1'), candidate: tok('--s3'), test: tok('--neutral')}[r]);
+const roleName = {prod: 'production', train: 'train', test: 'test', candidate: 'candidate'};
+
+// ---------- header, KPIs, findings ----------
+(function header() {
+  const m = D.meta;
+  const model = m.model.startsWith('checkpoint:') ? m.model.split(':')[1].split('/').slice(-3).join('/') : m.model;
+  $('subtitle').textContent = `${int(m.samples)} sampled images · ${D.domains.length} domains · embedding ${model} at ${m.image_size}px ${m.resize_mode}${m.use_bbox_crop ? ', bbox crop' : ''} · generated ${m.generated}`;
+  const k = D.kpis, tiles = [];
+  if (k.covered_attack !== undefined) tiles.push([pct(k.covered_attack), `of ${int(k.prod_attack)} production attacks have train data nearby`]);
+  if (k.covered_live !== undefined) tiles.push([pct(k.covered_live), `of ${int(k.prod_live)} production lives have train data nearby`]);
+  if (D.model) tiles.push([pct(D.model.prod_eer), `production EER of the scored model (${int(D.model.prod_scored)} samples)`]);
+  tiles.push([int(D.domains.filter((d) => d.role !== 'prod').length), 'non-production domains']);
+  $('kpis').innerHTML = tiles.map(([v, l]) => `<div class="kpi"><div class="v">${v}</div><div class="l">${esc(l)}</div></div>`).join('');
+  const kind = {coverage: 'Coverage', model: 'Model', collect: 'Collect', candidate: 'Candidate', low: 'Low value', separable: 'Separable', leak: 'Overlap'};
+  $('findings').innerHTML = D.findings.length ? D.findings.map((f) => `<li><span class="chip">${kind[f.kind] || f.kind}</span><span>${esc(f.text)}</span></li>`).join('')
+    : '<li><span>No findings crossed the thresholds.</span></li>';
+})();
+
+// ---------- map ----------
+const state = {color: 'role', label: 'all', roles: new Set(ROLES), focus: null, cluster: null, showClusters: true, k: 1, tx: 0, ty: 0};
+const COLOR_MODES = [['role', 'Role'], ['focus', 'Focus domain'], ['label', 'Label'], ['coverage', 'Prod coverage'], ['score', 'Model score']];
+const LABEL_MODES = [['all', 'All'], ['live', 'Live'], ['attack', 'Attack']];
+const present = new Set(CELLS.map((c) => c.role));
+$('map-note').textContent = `${D.meta.projection} of ${int(N)} points (all production plus an equal cap per domain). Circles are lives, triangles attacks. Distances on the map are approximate; the tables use the full ${D.meta.dims}-dimension space.`;
+
+function segmented(el, modes, get, set, disabled = () => false) {
+  el.innerHTML = modes.map(([v, l]) => `<button type="button" data-v="${v}">${l}</button>`).join('');
+  const sync = () => el.querySelectorAll('button').forEach((b) => { b.setAttribute('aria-pressed', String(b.dataset.v === get())); b.disabled = disabled(b.dataset.v); });
+  el.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.disabled) { set(b.dataset.v); sync(); } });
+  sync(); return sync;
+}
+const syncColor = segmented($('ctl-color'), COLOR_MODES, () => state.color, (v) => { state.color = v; drawMap(); drawLegend(); },
+  (v) => v === 'score' && !D.meta.has_scores);
+segmented($('ctl-label'), LABEL_MODES, () => state.label, (v) => { state.label = v; drawMap(); });
+$('ctl-roles').innerHTML = ROLES.filter((r) => present.has(r)).map((r) => `<label class="check"><input type="checkbox" data-role="${r}" checked> ${roleName[r]}</label>`).join(' ');
+$('ctl-roles').addEventListener('change', (e) => { const r = e.target.dataset.role; e.target.checked ? state.roles.add(r) : state.roles.delete(r); drawMap(); });
+$('ctl-clusters').addEventListener('change', (e) => { state.showClusters = e.target.checked; drawMap(); });
+
+const canvas = $('map'), ctx = canvas.getContext('2d');
+let W = 0, H = 0, grid = new Map();
+const PAD = 18, CELLPX = 14;
+const sx = (x) => (PAD + x * (W - 2 * PAD)) * state.k + state.tx;
+const sy = (y) => (PAD + (1 - y) * (H - 2 * PAD)) * state.k + state.ty;
+
+function style(i) {
+  const c = CELLS[P.cell[i]];
+  if (!state.roles.has(c.role) || (state.label !== 'all' && c.label !== state.label)) return null;
+  const dim = tok('--dim');
+  let s;
+  switch (state.color) {
+    case 'focus':
+      if (state.focus === null) s = {c: roleColor(c.role), a: 0.5, z: c.role === 'prod' ? 2 : 1};
+      else if (c.domain === state.focus) s = {c: tok('--s1'), a: 0.9, z: 3};
+      else if (c.role === 'prod') s = {c: tok('--s2'), a: 0.55, z: 2};
+      else s = {c: dim, a: 0.35, z: 0};
+      break;
+    case 'label': s = {c: c.label === 'live' ? tok('--s1') : tok('--s2'), a: 0.55, z: 1}; break;
+    case 'coverage':
+      s = c.role === 'prod' && P.coverage[i] !== null ? {c: seq(1 - P.coverage[i]), a: 0.9, z: 2} : {c: dim, a: 0.35, z: 0};
+      break;
+    case 'score': s = P.score[i] !== null ? {c: seq(P.score[i]), a: 0.75, z: 1} : {c: dim, a: 0.35, z: 0}; break;
+    default: s = {c: roleColor(c.role), a: c.role === 'prod' ? 0.8 : 0.5, z: c.role === 'prod' ? 2 : 1};
+  }
+  if (state.cluster !== null) s = P.cluster[i] === state.cluster ? {...s, a: 0.95, z: 4} : {c: dim, a: 0.25, z: 0};
+  return s;
+}
+
+function resize() {
+  const box = $('canvas-box'), dpr = window.devicePixelRatio || 1;
+  W = box.clientWidth; H = Math.round(Math.min(680, Math.max(380, W * 0.72)));
+  canvas.width = W * dpr; canvas.height = H * dpr; canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawMap() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = tok('--surface'); ctx.fillRect(0, 0, W, H);
+  const layers = [[], [], [], [], []], styles = new Array(N);
+  for (let i = 0; i < N; i++) { const s = style(i); styles[i] = s; if (s) layers[s.z].push(i); }
+  grid = new Map();
+  const r = Math.max(2.2, Math.min(4.5, 2.6 * Math.sqrt(state.k)));
+  for (const layer of layers) for (const i of layer) {
+    const x = sx(P.x[i]), y = sy(P.y[i]);
+    if (x < -5 || y < -5 || x > W + 5 || y > H + 5) continue;
+    const s = styles[i]; ctx.globalAlpha = s.a; ctx.fillStyle = s.c; ctx.beginPath();
+    if (CELLS[P.cell[i]].label === 'attack') { ctx.moveTo(x, y - r * 1.15); ctx.lineTo(x + r, y + r * 0.85); ctx.lineTo(x - r, y + r * 0.85); ctx.closePath(); }
+    else ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    const key = `${Math.floor(x / CELLPX)},${Math.floor(y / CELLPX)}`;
+    (grid.get(key) || grid.set(key, []).get(key)).push(i);
+  }
+  ctx.globalAlpha = 1;
+  if (state.showClusters) {
+    ctx.font = '600 12px system-ui, -apple-system, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const c of D.clusters) {
+      if (c.x === null) continue;
+      const x = sx(c.x), y = sy(c.y);
+      ctx.lineWidth = 3; ctx.strokeStyle = tok('--surface'); ctx.strokeText(String(c.id), x, y);
+      ctx.fillStyle = state.cluster === c.id ? tok('--ink') : tok('--ink-2'); ctx.fillText(String(c.id), x, y);
+    }
+  }
+}
+
+function nearest(mx, my) {
+  let best = null, bd = 12 * 12;
+  const gx = Math.floor(mx / CELLPX), gy = Math.floor(my / CELLPX);
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+    for (const i of grid.get(`${gx + dx},${gy + dy}`) || []) {
+      const d = (sx(P.x[i]) - mx) ** 2 + (sy(P.y[i]) - my) ** 2;
+      if (d < bd) { bd = d; best = i; }
+    }
+  }
+  return best;
+}
+
+const tip = $('tip');
+function showTip(html, ev) {
+  tip.innerHTML = html; tip.style.display = 'block';
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + r.width > window.innerWidth - 8) x = ev.clientX - r.width - 14;
+  if (y + r.height > window.innerHeight - 8) y = ev.clientY - r.height - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+
+let drag = null;
+canvas.addEventListener('mousemove', (ev) => {
+  const rect = canvas.getBoundingClientRect(), mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  if (drag) { state.tx = drag.tx + (mx - drag.x); state.ty = drag.ty + (my - drag.y); drag.moved = true; drawMap(); hideTip(); return; }
+  const i = nearest(mx, my);
+  if (i === null) return hideTip();
+  const c = CELLS[P.cell[i]];
+  showTip(`<b>${esc(c.domain)}</b> · ${c.label} <span class="m">(${roleName[c.role]})</span><br>`
+    + `<span class="m">region</span> ${P.cluster[i]}`
+    + (P.coverage[i] !== null ? ` · <span class="m">coverage</span> ${fmt(P.coverage[i])}` : '')
+    + (P.score[i] !== null ? ` · <span class="m">score</span> ${fmt(P.score[i], 3)}` : '')
+    + (P.meta[i] ? `<br>${esc(P.meta[i])}` : '') + `<br><span class="m">${esc(P.path[i])}</span>`, ev);
+});
+canvas.addEventListener('mouseleave', () => { hideTip(); drag = null; });
+canvas.addEventListener('mousedown', (ev) => { const rect = canvas.getBoundingClientRect(); drag = {x: ev.clientX - rect.left, y: ev.clientY - rect.top, tx: state.tx, ty: state.ty, moved: false}; });
+canvas.addEventListener('mouseup', (ev) => {
+  const wasDrag = drag && drag.moved; drag = null;
+  if (wasDrag) return;
+  const rect = canvas.getBoundingClientRect(), i = nearest(ev.clientX - rect.left, ev.clientY - rect.top);
+  if (i !== null) focusDomain(CELLS[P.cell[i]].domain);
+});
+canvas.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  const rect = canvas.getBoundingClientRect(), mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  const k = Math.max(1, Math.min(40, state.k * Math.exp(-ev.deltaY * 0.0015)));
+  state.tx = mx - (mx - state.tx) * (k / state.k); state.ty = my - (my - state.ty) * (k / state.k); state.k = k;
+  if (k === 1) { state.tx = 0; state.ty = 0; }
+  drawMap();
+}, {passive: false});
+canvas.addEventListener('dblclick', () => { state.k = 1; state.tx = 0; state.ty = 0; drawMap(); });
+
+function focusDomain(dom) {
+  state.focus = state.focus === dom ? null : dom; state.color = 'focus'; state.cluster = null;
+  syncColor(); drawMap(); drawLegend(); markRows();
+}
+function focusCluster(id) {
+  state.cluster = state.cluster === id ? null : id; drawMap(); markRows();
+  if (state.cluster !== null) $('canvas-box').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+
+function drawLegend() {
+  let top = '';
+  const shapes = `<div class="row"><span class="sw" style="background:var(--muted)"></span><span class="name">live</span></div>`
+    + `<div class="row"><span class="sw tri" style="color:var(--muted)"></span><span class="name">attack</span></div>`;
+  if (state.color === 'role' || (state.color === 'focus' && state.focus === null)) {
+    top = ROLES.filter((r) => present.has(r)).map((r) => `<div class="row"><span class="sw" style="background:${roleColor(r)}"></span><span class="name">${roleName[r]}</span></div>`).join('');
+  } else if (state.color === 'focus') {
+    top = `<div class="row"><span class="sw" style="background:${tok('--s1')}"></span><span class="name">${esc(state.focus)}</span></div>`
+      + `<div class="row"><span class="sw" style="background:${tok('--s2')}"></span><span class="name">production</span></div>`
+      + `<div class="row"><span class="sw" style="background:${tok('--dim')}"></span><span class="name">everything else</span></div>`;
+  } else if (state.color === 'label') {
+    top = `<div class="row"><span class="sw" style="background:${tok('--s1')}"></span><span class="name">live</span></div><div class="row"><span class="sw" style="background:${tok('--s2')}"></span><span class="name">attack</span></div>`;
+  } else {
+    const ramp = `linear-gradient(90deg, ${[0, .25, .5, .75, 1].map(seq).join(',')})`;
+    top = state.color === 'coverage'
+      ? `<div>Production only, by gap (1 − coverage)</div><div class="ramp" style="background:${ramp}"></div><div class="ramp-l"><span>train data nearby</span><span>none</span></div>`
+      : `<div>Model score P(attack)</div><div class="ramp" style="background:${ramp}"></div><div class="ramp-l"><span>0</span><span>1</span></div>`;
+  }
+  const byRole = {};
+  for (const d of D.domains) (byRole[d.role] = byRole[d.role] || []).push(d);
+  let list = '';
+  for (const r of ROLES) {
+    if (!byRole[r]) continue;
+    list += `<h3>${roleName[r]}</h3>` + byRole[r].map((d) => {
+      const n = ['live', 'attack'].map((l) => d.cells[l] ? d.cells[l].sampled : 0);
+      return `<div class="row${state.focus === d.domain ? ' sel' : ''}" data-domain="${esc(d.domain)}" title="${esc(d.domain)}"><span class="sw" style="background:${roleColor(r)}"></span><span class="name">${esc(d.domain)}</span><span class="cnt">${n[0]} / ${n[1]}</span></div>`;
+    }).join('');
+  }
+  $('legend').innerHTML = `<h3>Colour</h3>${top}<h3>Shape</h3>${shapes}<h3>Domains <span style="text-transform:none;font-weight:400">· click to focus · sampled live / attack</span></h3>${list}`;
+}
+$('legend').addEventListener('click', (e) => { const row = e.target.closest('[data-domain]'); if (row) focusDomain(row.dataset.domain); });
+
+// ---------- domains table ----------
+const domainRows = [];
+for (const d of D.domains) for (const lab of ['attack', 'live']) if (d.cells[lab]) domainRows.push({...d.cells[lab], domain: d.domain, role: d.role, tags: d.tags, label: lab});
+const DCOLS = [
+  ['domain', 'Domain', (r) => `${esc(r.domain)}${Object.keys(r.tags || {}).length ? `<br><span class="m">${esc(Object.entries(r.tags).map(([k, v]) => `${k}: ${v}`).join(' · '))}</span>` : ''}`],
+  ['role', 'Role', (r) => `<span class="status"><span class="sw" style="background:${roleColor(r.role)}"></span>${roleName[r.role]}</span>`],
+  ['label', 'Label', (r) => r.label],
+  ['rows', 'Rows', (r) => int(r.rows), 'num'],
+  ['sampled', 'Sampled', (r) => int(r.sampled), 'num'],
+  ['prod_lift', 'Prod lift', (r) => r.prod_lift === null ? '—' : (r.prod_lift >= 2 ? `<b>${fmt(r.prod_lift)}</b>` : fmt(r.prod_lift)), 'num'],
+  ['auc_vs_prod', 'AUC vs prod', (r) => fmt(r.auc_vs_prod, 3), 'num'],
+  ['delta_covered', 'Δ covered', (r) => r.delta_covered === null || r.delta_covered === undefined ? '—' : (r.delta_covered > 0 ? '+' : r.delta_covered < 0 ? '−' : '') + Math.abs(r.delta_covered), 'num'],
+  ['self_lift', 'Self-affinity', (r) => fmt(r.self_lift, 1), 'num'],
+  ['error', 'Error', (r) => pct(r.error), 'num'],
+  ['nearest', 'Nearest cells', (r) => `<span class="m" style="display:inline-block;min-width:240px">${esc(r.nearest.join(', '))}</span>`],
+];
+let dSort = {key: 'role', dir: 1};
+function drawDomains() {
+  const rows = [...domainRows].sort((a, b) => {
+    const k = dSort.key;
+    let va = a[k], vb = b[k];
+    if (k === 'role') { va = ROLES.indexOf(a.role) * 1000 + (a.label === 'attack' ? 0 : 1); vb = ROLES.indexOf(b.role) * 1000 + (b.label === 'attack' ? 0 : 1); }
+    if (va === null || va === undefined) return 1; if (vb === null || vb === undefined) return -1;
+    return (typeof va === 'string' ? va.localeCompare(vb) : va - vb) * dSort.dir;
+  });
+  $('domains').innerHTML = `<thead><tr>${DCOLS.map(([k, l, , c]) => `<th class="sortable ${c || ''}" data-k="${k}">${l}${dSort.key === k ? (dSort.dir > 0 ? ' ↑' : ' ↓') : ''}</th>`).join('')}</tr></thead>`
+    + `<tbody>${rows.map((r) => `<tr class="click" data-domain="${esc(r.domain)}">${DCOLS.map(([, , f, c]) => `<td class="${c || ''}">${f(r)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  markRows();
+}
+$('domains').addEventListener('click', (e) => {
+  const th = e.target.closest('th[data-k]');
+  if (th) { dSort = {key: th.dataset.k, dir: dSort.key === th.dataset.k ? -dSort.dir : (['domain', 'role', 'label'].includes(th.dataset.k) ? 1 : -1)}; drawDomains(); return; }
+  const tr = e.target.closest('tr[data-domain]');
+  if (tr) { focusDomain(tr.dataset.domain); $('canvas-box').scrollIntoView({behavior: 'smooth', block: 'center'}); }
+});
+function markRows() {
+  document.querySelectorAll('#domains tr[data-domain]').forEach((tr) => tr.classList.toggle('sel', tr.dataset.domain === state.focus));
+  document.querySelectorAll('#clusters tr[data-cluster]').forEach((tr) => tr.classList.toggle('sel', Number(tr.dataset.cluster) === state.cluster));
+}
+
+// ---------- production breakdown ----------
+const bdCols = [...new Set(D.prod_breakdown.map((r) => r.column))];
+const bd = {col: bdCols[0], label: 'attack'};
+if (!bdCols.length) $('breakdown-section').querySelector('.note').textContent = 'No metadata columns were kept for production sources (set meta_cols in the config).';
+$('bd-col').innerHTML = bdCols.map((c) => `<option>${esc(c)}</option>`).join('');
+$('bd-col').addEventListener('change', (e) => { bd.col = e.target.value; drawBreakdown(); });
+segmented($('bd-label'), [['attack', 'Attack'], ['live', 'Live'], ['all', 'Both']], () => bd.label, (v) => { bd.label = v; drawBreakdown(); });
+function drawBreakdown() {
+  if (!bdCols.length) { $('breakdown').innerHTML = ''; return; }
+  const rows = D.prod_breakdown.filter((r) => r.column === bd.col && (bd.label === 'all' || r.label === bd.label));
+  const hasErr = rows.some((r) => r.error !== null);
+  $('breakdown').innerHTML = `<thead><tr><th>${esc(bd.col)}</th><th>Label</th><th class="num">Production</th><th class="num">Uncovered</th><th>Coverage</th>${hasErr ? '<th class="num">Error</th>' : ''}<th>Nearest non-prod domains</th></tr></thead><tbody>`
+    + rows.map((r) => `<tr><td>${esc(r.value)}</td><td>${r.label}</td><td class="num">${int(r.n)}</td><td class="num">${int(r.uncovered)}</td>`
+      + `<td><div style="display:flex;gap:8px;align-items:center"><div class="bar" style="flex:1"><span style="width:${Math.round(100 * Math.min(1, r.coverage))}%"></span></div><span class="m" style="font-variant-numeric:tabular-nums">${fmt(r.coverage)}</span></div></td>`
+      + (hasErr ? `<td class="num">${pct(r.error)}</td>` : '') + `<td><span class="m">${esc(r.nearest.join(', '))}</span></td></tr>`).join('')
+    + (rows.length ? '' : `<tr><td colspan="7" class="m">No group with at least the minimum support.</td></tr>`) + '</tbody>';
+}
+
+// ---------- clusters ----------
+function drawClusters() {
+  const st = {
+    'production gap': `<span class="status"><i style="color:var(--warning)">▲</i>production gap</span>`,
+    'shared': `<span class="status"><i style="color:var(--good)">●</i>shared</span>`,
+    'pool only': `<span class="status"><i style="color:var(--muted)">○</i>pool only</span>`,
+  };
+  const hasErr = D.clusters.some((c) => c.error !== null), hasThumbs = D.meta.has_thumbs;
+  $('clusters').innerHTML = `<thead><tr><th class="num">#</th><th>Status</th><th class="num">Samples</th><th>Composition</th><th class="num">Live / attack</th><th class="num">Prod coverage</th>${hasErr ? '<th class="num">Prod error</th>' : ''}<th>Top domains</th><th>Production metadata</th>${hasThumbs ? '<th>Examples <span class="m">(orange ring: production)</span></th>' : ''}</tr></thead><tbody>`
+    + D.clusters.map((c) => {
+      const stack = ROLES.filter((r) => c.roles[r]).map((r) => `<span title="${roleName[r]}: ${c.roles[r]}" style="flex:${c.roles[r]};background:${roleColor(r)}"></span>`).join('');
+      return `<tr class="click" data-cluster="${c.id}"><td class="num">${c.id}</td><td>${st[c.status]}</td><td class="num">${int(c.n)}</td>`
+        + `<td><div class="stack">${stack}</div><span class="m">${ROLES.filter((r) => c.roles[r]).map((r) => `${roleName[r]} ${c.roles[r]}`).join(' · ')}</span></td>`
+        + `<td class="num">${c.labels.live} / ${c.labels.attack}</td><td class="num">${fmt(c.coverage)}</td>${hasErr ? `<td class="num">${pct(c.error)}</td>` : ''}`
+        + `<td><span class="m">${esc(c.domains.join(', '))}</span></td><td><span class="m">${esc(c.prod_meta.join(', '))}</span></td>`
+        + (hasThumbs ? `<td><div class="thumbs">${c.thumbs.map((t) => `<img loading="lazy" class="${t.role === 'prod' ? 'prod' : ''}" src="${t.src}" title="${esc(t.caption)}" alt="${esc(t.caption)}">`).join('')}</div></td>` : '')
+        + '</tr>';
+    }).join('') + '</tbody>';
+}
+$('clusters').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-cluster]'); if (tr) focusCluster(Number(tr.dataset.cluster)); });
+
+// ---------- affinity heatmap ----------
+function cellName(i) { const c = CELLS[i]; return `${c.domain} · ${c.label}`; }
+function drawHeat() {
+  const order = D.affinity.order, M = D.affinity.log2_lift, n = order.length;
+  const labelW = Math.min(300, 30 + Math.max(...order.map((i) => cellName(i).length)) * 6.4);
+  const avail = Math.max(320, $('heat').parentElement.clientWidth - labelW - 10);
+  const s = Math.max(10, Math.min(26, Math.floor(avail / n)));
+  const top = 22, svg = $('heat');
+  svg.setAttribute('width', labelW + n * s + 4); svg.setAttribute('height', top + n * s + 4);
+  let out = '';
+  order.forEach((ci, col) => { out += `<text x="${labelW + col * s + s / 2}" y="${top - 8}" text-anchor="middle">${col + 1}</text>`; });
+  order.forEach((ri, row) => {
+    const role = CELLS[ri].role;
+    out += `<circle cx="${8}" cy="${top + row * s + s / 2}" r="4" fill="${roleColor(role)}"></circle>`;
+    out += `<text x="18" y="${top + row * s + s / 2 + 4}">${row + 1}  ${esc(cellName(ri).length > 44 ? cellName(ri).slice(0, 43) + '…' : cellName(ri))}</text>`;
+    order.forEach((ci, col) => {
+      const v = M[ri][ci];
+      out += `<rect x="${labelW + col * s + 1}" y="${top + row * s + 1}" width="${s - 2}" height="${s - 2}" rx="2" fill="${diverging(v)}" data-r="${ri}" data-c="${ci}"></rect>`;
+    });
+  });
+  svg.innerHTML = out;
+  const ramp = `linear-gradient(90deg, ${[-3, -1.5, 0, 1.5, 3].map((v) => diverging(v)).join(',')})`;
+  $('heat-legend').innerHTML = `<div style="max-width:320px;margin-bottom:8px"><div class="ramp" style="background:${ramp}"></div><div class="ramp-l"><span>⅛× (avoided)</span><span>1× (chance)</span><span>8× (close)</span></div></div>`;
+  $('heat-table').innerHTML = `<thead><tr><th>Cell</th>${order.map((_, j) => `<th class="num">${j + 1}</th>`).join('')}</tr></thead><tbody>`
+    + order.map((ri, row) => `<tr><td>${row + 1} ${esc(cellName(ri))}</td>${order.map((ci) => `<td class="num">${fmt(M[ri][ci], 1)}</td>`).join('')}</tr>`).join('') + '</tbody>';
+}
+$('heat').addEventListener('mousemove', (ev) => {
+  const r = ev.target.closest('rect');
+  if (!r) return hideTip();
+  const ri = Number(r.dataset.r), ci = Number(r.dataset.c), v = D.affinity.log2_lift[ri][ci];
+  showTip(`<b>${esc(cellName(ri))}</b><br>→ ${esc(cellName(ci))}<br>neighbours: <b>${fmt(2 ** v, 2)}×</b> chance <span class="m">(log₂ ${fmt(v, 1)})</span>`, ev);
+});
+$('heat').addEventListener('mouseleave', hideTip);
+
+// ---------- definitions ----------
+(function defs() {
+  const m = D.meta;
+  const items = [
+    ['Coverage', `Per production sample: the share of its ${m.k} nearest same-label neighbours (production ∪ train) that are train, over the share expected if both were evenly mixed. ~1 means train has data like it; below ${m.uncovered} the sample counts as uncovered — a production-only region with nothing to learn it from. Neighbours from the same session are skipped.`],
+    ['Prod lift', 'How often a non-production cell is among the nearest non-production neighbours of production samples (same label), over its share of the non-production pool. Above 1 it looks like production; below 1 it lives elsewhere.'],
+    ['AUC vs prod', 'Cross-validated linear probe, this cell vs production of the same label, folds split by session. 0.5 indistinguishable, 1.0 trivially separable.'],
+    ['Δ covered', 'Train domains: production samples that become uncovered if the domain is removed (its unique contribution). Test and candidate domains: production samples that become covered if it is added to train.'],
+    ['Self-affinity', 'log₂ of how much more often a cell’s neighbours are its own members than chance. High means a self-contained look; combined with AUC ≈ 1 it is something a model can recognise instead of the attack.'],
+    ['Error', D.model ? `Share misclassified at the production EER threshold (${fmt(D.model.threshold, 3)}): attacks scored below it, lives at or above it. Scores on training data are optimistic.` : 'Not available: no scores were given (--scores, or a score column in the manifest).'],
+    ['Regions', `KMeans on the embedding. Production gap: mean production coverage below ${m.uncovered}. Pool only: under a fifth of the production share expected by size. Shared: the rest.`],
+    ['Embedding', `${m.model} at ${m.image_size}px (${m.resize_mode}), reduced to ${m.dims} PCA dimensions fitted on a domain-balanced subset (${(m.explained * 100).toFixed(1)}% of variance), then L2-normalised. Sampling caps per domain mean the sizes here are not dataset sizes; “Rows” is.`],
+  ];
+  $('defs').innerHTML = items.map(([t, d]) => `<dt>${t}</dt><dd>${esc(d)}</dd>`).join('');
+  $('sources').innerHTML = '<thead><tr><th>Source</th><th>Role</th><th>Manifest</th></tr></thead><tbody>'
+    + m.sources.map((s) => `<tr><td>${esc(s.name)}</td><td>${roleName[s.role]}</td><td><span class="m">${esc(s.csv)}</span></td></tr>`).join('') + '</tbody>';
+})();
+
+function renderAll() { resize(); drawMap(); drawLegend(); drawHeat(); }
+drawDomains(); drawBreakdown(); drawClusters(); renderAll();
+let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderAll, 120); });
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { renderAll(); drawDomains(); drawClusters(); });
+</script>
+</body>
+</html>

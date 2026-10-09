@@ -1,0 +1,41 @@
+{
+  "_comment": "Registry for dataset_domains.py. role: prod | train | test | candidate. split_col splits a manifest into domains by that column; without it the whole source is one domain. meta_cols (list or {column: name}) are kept per sample for the production breakdown. group_by: auto (frames/ folders are one video, other files stand alone) | parent (the folder holding the file) | file; a `group` column overrides it. Set \"thumbs\": false to keep a source out of thumbnails. Paths are relative to the repo root.",
+  "path_map": {
+    "/mnt/dataefs/data": "/home/sagemaker-user/seon-data-efs/data",
+    "/mnt/userefs/aleksandr_khaimin": "/home/sagemaker-user/seon-data-efs/users/aleksandr_khaimin"
+  },
+  "sources": [
+    {
+      "name": "prod_0.3",
+      "csv": "data/ProdTest-0.3_det_ik.csv",
+      "role": "prod",
+      "group_by": "parent",
+      "meta_cols": {"dataset": "doc_type", "decision": "docdet_decision"}
+    },
+    {
+      "name": "train_sept",
+      "csv": "data/train_Seon-PintV1_ah_darkenv_augvol1_interns_clean_no-unidata_no-docxpand_balanced.csv",
+      "role": "train",
+      "split_col": "dataset"
+    },
+    {
+      "name": "pinterest_test",
+      "csv": "data/test_Pinterest_v_1_checked_det_ik.csv",
+      "role": "test"
+    },
+    {
+      "name": "legacy_docx_exp12",
+      "csv": "data/train_Seon-DocX-exp12.csv",
+      "role": "candidate",
+      "split_col": "dataset"
+    },
+    {
+      "name": "docxpand_replays",
+      "csv": "data/train_DocXpand_replays-bbox.csv",
+      "role": "candidate",
+      "split_col": "dataset",
+      "tags": {"origin": "synthetic documents, real screen replay"}
+    }
+  ],
+  "domain_tags": {}
+}

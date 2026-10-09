@@ -223,3 +223,18 @@ python -m http.server 8765 --directory eval_results
 ```
 
 Then open `http://localhost:8765/training_eer_report.html`. A `file://` URL must be the absolute path (three slashes) and is often blocked in Simple Browser.
+
+### Dataset domain map
+
+`dataset_domains.py` puts every dataset in one embedding space and measures how each relates to production: which production regions have no training data nearby, which datasets look like production, and how much production a candidate dataset would cover. Register manifests in `configs/domains.json` (role `prod` / `train` / `test` / `candidate`; `split_col` splits a manifest into domains by a column, e.g. `dataset`), then:
+
+```bash
+python dataset_domains.py embed --config configs/domains.json \
+  --checkpoint eval_results/<job>/output/best.keras --out-dir runs/domains/m1
+python dataset_domains.py report --config configs/domains.json --out-dir runs/domains/m1 \
+  --scores eval_results/<eval-job>/output/<model>_predictions.csv
+```
+
+`embed` needs the images and writes one `.npz` per source (up to `--max-per-cell` rows per domain and label, `--max-per-group` frames per video). A source that is already embedded with the same model and settings is skipped, so adding a candidate costs only its own embedding. `report` reads only the `.npz` files and runs anywhere in seconds (scikit-learn; `umap-learn` if installed, else t-SNE). It writes `domains.html`, `summary.json`, and `samples.csv` (per-sample coverage, region and nearest domain). `--scores` is optional; with it the report adds model error at the production EER threshold for each region and metadata group.
+
+`--imagenet` in place of `--checkpoint` embeds with ImageNet EfficientNetB2: visual similarity regardless of what the current model learned. Keep one `--out-dir` per embedding; the report refuses to mix them. `--thumb-size 64` stores small whole-frame thumbnails, production included, and shows a few per region. The `.npz` files also work as `--embeddings` / `--prod-embeddings` for `mine_hard_samples.py`.

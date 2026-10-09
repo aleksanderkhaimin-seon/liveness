@@ -228,6 +228,30 @@ Training uses `albumentations` in the `tf.data` input pipeline:
 
 Validation, testing, checkpoint conversion, and ONNX inference do not include augmentations.
 
+### Frequency augmentations
+
+In the training manifests the label tracks the source. Lives are mostly 3024×4032 phone photos and scraped web images. Attacks are mostly 1920×1080 replay frames. In production both classes arrive at about 1920 px through the same pipeline. A model can therefore separate the training classes by their capture fingerprint instead of the attack: the resampling ratio to the network input, JPEG history, sensor noise and sharpening. These cues all sit in the image spectrum. `--freq-aug` (config key `freq_aug`) adds training-only transforms that make those cues unreliable:
+
+| spec | effect |
+|---|---|
+| `rescale:P` | before the network resize, area-downsample the frame to a long side log-uniform in [S, 4S] (S = `image_size`; never upsampled), then re-encode it as JPEG at quality 60–95 |
+| `bandstop:P` | attenuate a random ring of the network input's spectrum (centre 0.1–1.0 of Nyquist, width 0.05–0.3, depth 50–100%) |
+| `ampmix:P[:ETA]` | per batch, mix each image's Fourier amplitude with that of a random image of the other class and keep its own phase; mixing weight U(0, ETA), ETA defaults to 0.5 |
+
+```bash
+python sagemaker_job/launch.py --config configs/train-gpu.json --freq-aug rescale:0.5,bandstop:0.3,ampmix:0.5
+```
+
+They are recorded under `freq_aug` in `report.json`. On a laptop CPU they add about 2 ms per 512 px image, which is small next to decoding 4K JPEGs.
+
+`frequency_shortcuts.py` checks whether such a shortcut exists and whether a model uses it. It measures the network input exactly as validation sees it. A spectrum-only linear probe is fitted on train and scored on prod. A per-band, per-orientation effect size (attack − live) is computed for train and prod. With `--checkpoint`, it also reports the EER change on each split when one radial band is removed. A band that matters on the in-distribution test but not on prod is a band the model relies on that does not transfer.
+
+```bash
+python frequency_shortcuts.py --train data/train.csv --prod data/ProdTest-0.3.csv \
+  --test data/test_Pinterest_v_1_checked.csv --checkpoint eval_results/<job>/output/best.keras \
+  --out-dir runs/freq/<job>
+```
+
 ## Outputs
 
 The script writes:

@@ -248,3 +248,15 @@ python dataset_domains.py report --config configs/domains.json --out-dir runs/do
 `embed` needs the images and writes one `.npz` per source (up to `--max-per-cell` rows per domain and label, `--max-per-group` frames per video). A source that is already embedded with the same model and settings is skipped, so adding a candidate costs only its own embedding. `report` reads only the `.npz` files and runs anywhere in seconds (scikit-learn; `umap-learn` if installed, else t-SNE). It writes `domains.html`, `summary.json`, and `samples.csv` (per-sample coverage, region and nearest domain). `--scores` is optional; with it the report adds model error at the production EER threshold for each region and metadata group.
 
 `--imagenet` in place of `--checkpoint` embeds with ImageNet EfficientNetB2: visual similarity regardless of what the current model learned. Keep one `--out-dir` per embedding; the report refuses to mix them. `--thumb-size 64` stores small whole-frame thumbnails, production included, and shows a few per region. The `.npz` files also work as `--embeddings` / `--prod-embeddings` for `mine_hard_samples.py`.
+
+### Refit the last layer on production
+
+`fit_prod_head.py` keeps a checkpoint's backbone frozen and refits only `live_score` (logistic regression or LDA) on labelled production frames. It folds the result back into an ordinary `head.keras`, so `predict_checkpoint_csv.py` and `convert_checkpoint_to_onnx.py` work on it unchanged; the `report.json` it writes next to it carries the input geometry.
+
+```bash
+python fit_prod_head.py --checkpoint eval_results/<job>/output/best.keras \
+  --prod-csv data/ProdTest-0.3_det_ik.csv --holdout-csv data/<independent-prod>.csv \
+  --out-dir runs/prod_head/<name>
+```
+
+It reports production EER for the current head and for the new head under random folds, and with whole groups held out (`--group`, default `dataset` = document type and `path:-4` = merchant). It also reports the EER of each group alone, the shortcut to beat. The held-out-group numbers are the honest ones: in ProdTest-0.3 document type alone predicts the label at ~11% EER. With `--holdout-csv` it compares old and new heads on a production set that was used nowhere else, and refuses one that shares sessions with the fit set. The shipped threshold (`report.json` → `threshold.probability`) is the EER point of the held-out-group scores. `--breakdown` (default `orientation`, from the `width`/`height` columns) prints lives rejected and attacks missed per value for the old and new heads. On the 1833 checkpoint the held-out-group EER was 6.5–7.4% against 12.8% for the trained head. Landscape lives were still rejected more often than portrait ones (22.6% vs 6.4%).

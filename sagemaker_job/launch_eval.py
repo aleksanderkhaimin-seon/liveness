@@ -62,6 +62,20 @@ def keras_files_in_dir(directory: Path) -> list[Path]:
     )
 
 
+def staged_names(paths: list[Path]) -> list[str]:
+    """Distinct file names for staging: the basename, prefixed with as many parent folders as it takes.
+
+    eval_results/<job>/output/best.keras for several jobs would otherwise all stage as best.keras
+    and overwrite each other.
+    """
+    parts = [path.resolve().parts for path in paths]
+    for depth in range(1, max((len(p) for p in parts), default=1) + 1):
+        names = ["_".join(p[-depth:]) for p in parts]
+        if len(set(names)) == len(names):
+            return names
+    raise ValueError("Could not give the checkpoints distinct names")
+
+
 def collect_checkpoints(paths: list[Path] | None) -> tuple[list[Path], list[dict[str, str]]]:
     if not paths:
         return [], []
@@ -107,6 +121,8 @@ def collect_checkpoints(paths: list[Path] | None) -> tuple[list[Path], list[dict
             unique_records.append(record)
     if paths and not unique:
         raise FileNotFoundError("No .keras files found under --checkpoint.")
+    for record, name in zip(unique_records, staged_names(unique)):
+        record["name"] = name
     return unique, unique_records
 
 
@@ -136,8 +152,8 @@ def stage_source(
         shutil.copy2(onnx_path, models / onnx_path.name)
     ckpt_dir = stage / "checkpoints"
     ckpt_dir.mkdir()
-    for checkpoint in checkpoints:
-        shutil.copy2(checkpoint, ckpt_dir / checkpoint.name)
+    for checkpoint, record in zip(checkpoints, checkpoint_records):
+        shutil.copy2(checkpoint, ckpt_dir / record["name"])
     if checkpoint_records:
         sources = {
             "checkpoint_args": [str(path) for path in (checkpoint_args or [])],
@@ -237,7 +253,7 @@ def main() -> None:
     if onnx_files:
         hyperparameters["onnx"] = ",".join(path.name for path in onnx_files)
     if checkpoints:
-        joined = ",".join(path.name for path in checkpoints)
+        joined = ",".join(record["name"] for record in checkpoint_records)
         hyperparameters["checkpoint"] = joined if len(joined) < 240 else "*"
         hyperparameters["opset"] = str(args.opset)
 
@@ -286,7 +302,7 @@ def main() -> None:
         print("Submitting SageMaker evaluation job")
         print(f"  csv: {args.csv}")
         print(f"  onnx: {[path.name for path in onnx_files]}")
-        print(f"  checkpoint: {[path.name for path in checkpoints]}")
+        print(f"  checkpoint: {[record['name'] for record in checkpoint_records]}")
         print(f"  instance: {args.instance_type}")
         print(f"  device: {args.device}")
         trainer.train(wait=args.wait, logs=args.wait)

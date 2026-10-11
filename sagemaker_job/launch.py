@@ -411,6 +411,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-bbox-crop", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--margin", type=float)
     parser.add_argument("--bbox-aug-prob", type=float)
+    parser.add_argument("--cover-attack-datasets", action=argparse.BooleanOptionalAction, default=None,
+                        help="One attack from each attack dataset in every batch. Overrides the config's cover_attack_datasets.")
     parser.add_argument("--rot90-prob", type=float, default=None,
                         help="Probability of a quarter-turn rotation of each training frame. Overrides the config's rot90_prob.")
     parser.add_argument(

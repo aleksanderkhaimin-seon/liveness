@@ -187,6 +187,8 @@ python train_efficientnet_b2.py --csv test_df.csv --train-backbone
 
 `--image-size N` (config key `image_size`, default 512) sets the network input side; `--resize-mode squash|letterbox` (default `squash`) sets how a frame is brought to that square. `squash` is the historical bilinear resize ignoring aspect. `letterbox` downsamples with an area filter only if the frame is larger than the target, never upsamples, and pads centred with the frame's mean colour — a frame that already fits is copied pixel for pixel. Frames exported with `export_lowres_frames.py --mode doc --size 96` are 164–211 px on the long side, so at `--image-size 224 --resize-mode letterbox` almost none of them is resampled at all.
 
+The inference scripts (`predict_onnx_csv.py`, `infer_onnx.py`, via `input_geometry.fit_to_input_array`) reproduce this exactly with OpenCV on float32: `INTER_LINEAR` for squash, `INTER_AREA` for letterbox. They match the training input to within 0.04 grey levels. One small difference remains, in JPEG decoding: `tf.io.decode_image` uses libjpeg's fast integer IDCT, while PIL and OpenCV use the accurate one. That's about 1 grey level on average, at most 7.
+
 `report.json` records `input.{image_size, resize_mode}` and `throughput.{train_seconds_per_epoch, train_images_per_sec}`. `predict_onnx_csv.py`, `predict_checkpoint_csv.py`, `convert_checkpoint_to_onnx.py` and `infer_onnx.py` still assume 512 and need the size passed through before a model trained at another size is exported.
 
 ## Anonymisation Degradations

@@ -102,6 +102,8 @@ After training, metrics from `history.csv` / `report.json` go to experiment `liv
 
 SageMaker has no separate ONNX eval job type. `sagemaker_job/launch_eval.py` submits a Training Job that runs `predict_onnx_csv.py` and writes EER metrics.
 
+Frames are resized exactly as in training: OpenCV `INTER_LINEAR` for squash and `INTER_AREA` for letterbox, on float32, which is what the exported model JSON declares. Before October 2026, `predict_onnx_csv.py` and `infer_onnx.py` resized with PIL, which smooths when shrinking. That fed the models softer frames than training did, so ONNX EER came out 0.3–1.4 points worse than the training-time `val_eer` of the same checkpoint. Don't compare eval reports from before and after this change.
+
 ```bash
 python sagemaker_job/launch_eval.py \
   --csv data/ProdTest-0.2-val.csv \

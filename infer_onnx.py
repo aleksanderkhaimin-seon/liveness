@@ -4,11 +4,12 @@ import json
 import math
 from pathlib import Path
 
+import cv2
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
-from input_geometry import fit_to_input_pil
+from input_geometry import fit_to_input_array
 
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -53,11 +54,10 @@ def input_layout(input_shape: list) -> str:
 
 
 def interpolation_mode(mode: str) -> int:
-    if mode == "INTER_LINEAR":
-        return Image.Resampling.BILINEAR
-    if mode == "INTER_CUBIC":
-        return Image.Resampling.BICUBIC
-    return Image.Resampling.NEAREST
+    """The config names OpenCV flags; PIL's filters of the same name smooth when shrinking, OpenCV's do not."""
+    return {"INTER_LINEAR": cv2.INTER_LINEAR, "INTER_CUBIC": cv2.INTER_CUBIC, "INTER_AREA": cv2.INTER_AREA}.get(
+        mode, cv2.INTER_NEAREST
+    )
 
 
 def normalize(array: np.ndarray, step: dict) -> np.ndarray:
@@ -74,8 +74,8 @@ def normalize(array: np.ndarray, step: dict) -> np.ndarray:
 
 
 def apply_preprocessors(image: Image.Image, config: dict) -> np.ndarray:
-    current_image = image.convert("RGB")
-    array = None
+    # float32 throughout, as in training: no rounding back to uint8 between steps.
+    array = np.asarray(image.convert("RGB"), dtype=np.float32)
 
     for step in config.get("preprocessors", []):
         step_type = step.get("type")
@@ -84,21 +84,12 @@ def apply_preprocessors(image: Image.Image, config: dict) -> np.ndarray:
             width = int(step["target_width"])
             height = int(step["target_height"])
             interpolation = interpolation_mode(step.get("interpolation_mode", "INTER_NEAREST"))
-            current_image = current_image.resize((width, height), interpolation)
-            array = None
-            continue
-
-        if step_type == "letterbox":
+            array = cv2.resize(array, (width, height), interpolation=interpolation)
+        elif step_type == "letterbox":
             # Downscale only if larger, never upscale, pad centred with the frame mean
             # (train_efficientnet_b2.fit_to_input with resize_mode=letterbox).
-            current_image = fit_to_input_pil(current_image, int(step["target_width"]), "letterbox")
-            array = None
-            continue
-
-        if array is None:
-            array = np.asarray(current_image, dtype=np.float32)
-
-        if step_type == "convert_to_float":
+            array = fit_to_input_array(array, int(step["target_width"]), "letterbox")
+        elif step_type == "convert_to_float":
             array = array.astype(np.float32, copy=False)
         elif step_type == "normalize":
             array = normalize(array.astype(np.float32, copy=False), step)
@@ -106,9 +97,6 @@ def apply_preprocessors(image: Image.Image, config: dict) -> np.ndarray:
             continue
         else:
             raise ValueError(f"Unsupported preprocessor type: {step_type}")
-
-    if array is None:
-        array = np.asarray(current_image, dtype=np.float32)
 
     return array.astype(np.float32, copy=False)
 

@@ -9,10 +9,11 @@ same choice, so this module centralises:
   * where to find it -- the model's own input shape for the size, and the
     run's report.json (next to the checkpoint) or the exported model's JSON
     config for the mode;
-  * how to apply it in PIL/numpy, mirroring fit_to_input() in the training
-    script: squash = bilinear resize ignoring aspect; letterbox = area
-    downscale only if the frame is larger, never upscale, pad centred with
-    the frame's per-channel mean, frame copied exactly otherwise.
+  * how to apply it with OpenCV/numpy, numerically identical to
+    fit_to_input() in the training script: squash = bilinear resize without
+    antialiasing, ignoring aspect; letterbox = area downscale only if the
+    frame is larger, never upscale, pad centred with the frame's per-channel
+    mean, frame copied exactly otherwise.
 
 No TensorFlow dependency, so the ONNX tools can import it.
 """
@@ -23,6 +24,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -130,30 +132,38 @@ def resolve_geometry(
 
 # -- application --------------------------------------------------------------
 
-def fit_to_input_pil(image: Image.Image, image_size: int, resize_mode: str) -> Image.Image:
-    """PIL mirror of train_efficientnet_b2.fit_to_input()."""
-    image = image.convert("RGB")
+def fit_to_input_array(image: Image.Image | np.ndarray, image_size: int, resize_mode: str) -> np.ndarray:
+    """float32 [H, W, 3] in [0, 255], as the network expects: train_efficientnet_b2.fit_to_input().
+
+    OpenCV on float32 reproduces tf.image.resize exactly -- INTER_LINEAR is bilinear without
+    antialiasing (squash), INTER_AREA is area averaging (letterbox shrink) -- and those are the
+    names the exported model config declares. PIL's BILINEAR and BOX smooth differently when
+    shrinking; until October 2026 this function used them and fed the ONNX evaluation visibly
+    softer frames than training (squash 1920 -> 512: mean difference of 31 grey levels).
+    """
+    if isinstance(image, Image.Image):
+        image = image.convert("RGB")
+    array = np.asarray(image, dtype=np.float32)
     if resize_mode == "squash":
-        return image.resize((image_size, image_size), Image.Resampling.BILINEAR)
+        return cv2.resize(array, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
     if resize_mode != "letterbox":
         raise ValueError(f"resize_mode must be one of {RESIZE_MODES}, got {resize_mode!r}")
 
-    scale = min(1.0, image_size / max(image.size))
+    height, width = array.shape[:2]
+    # float32 and round-half-to-even, as tf.round in fit_to_input, so the shrunk size matches to the pixel.
+    scale = min(np.float32(1.0), np.float32(image_size) / np.float32(max(height, width)))
     if scale < 1.0:
-        image = image.resize(
-            (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
-            Image.Resampling.BOX,
-        )
-    width, height = image.size
-    mean = tuple(int(round(v)) for v in np.asarray(image, dtype=np.float32).reshape(-1, 3).mean(axis=0))
-    canvas = Image.new("RGB", (image_size, image_size), mean)
-    canvas.paste(image, ((image_size - width) // 2, (image_size - height) // 2))
+        new_height = max(1, int(np.round(np.float32(height) * scale)))
+        new_width = max(1, int(np.round(np.float32(width) * scale)))
+        array = cv2.resize(array, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    array = array[:image_size, :image_size]
+    height, width = array.shape[:2]
+    canvas = np.empty((image_size, image_size, 3), np.float32)
+    canvas[:] = array.reshape(-1, 3).mean(axis=0)
+    top = (image_size - height) // 2
+    left = (image_size - width) // 2
+    canvas[top:top + height, left:left + width] = array
     return canvas
-
-
-def fit_to_input_array(image: Image.Image, image_size: int, resize_mode: str) -> np.ndarray:
-    """float32 [H, W, 3] in [0, 255], as the network expects."""
-    return np.asarray(fit_to_input_pil(image, image_size, resize_mode), dtype=np.float32)
 
 
 def preprocessor_steps(image_size: int, resize_mode: str) -> list[dict]:

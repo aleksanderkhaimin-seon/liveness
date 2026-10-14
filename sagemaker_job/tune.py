@@ -5,6 +5,10 @@ Reuses launch.build_trainer(), so image, EFS channels, VPC and MLflow are those 
 training job. Every trial runs sagemaker_job/train.py, which prints `objective_val_eer: <x>`
 once at the end (val_eer of the epoch best.keras comes from); the tuner minimises it.
 
+The tuning API cannot set a container entrypoint, so the image must ship a `train` executable
+(Dockerfile.cuda installs sagemaker_job/amt_entrypoint.py as one). Rebuild and push the image,
+then pass it with --image-uri or update DEFAULT_IMAGE in launch.py.
+
 val_eer on one prod set moves 1.5-3 points with the seed alone. Search with the config's fixed
 seed on a validation_csv that is NOT the set you report, then re-run the best few configs with
 several seeds and report on the held-out test_csv.
@@ -289,6 +293,7 @@ def main() -> None:
         f"Trials: {args.max_jobs} ({args.strategy}), {args.max_parallel_jobs} at a time on "
         f"{args.instance_type}; worst case {waves} x {args.max_run / 3600:g} h wall time"
     )
+    print(f"Image:  {args.image_uri}\n        must ship /usr/local/bin/train (see Dockerfile.cuda); tuning jobs cannot override it")
     if args.print_space:
         return
 
@@ -317,7 +322,10 @@ def main() -> None:
         if args.dry_run:
             print("Dry run: nothing was submitted.")
             return
-        # The source tarball is uploaded inside tune(), so the stage must outlive this call.
+        # Mount the staged source at /opt/ml/input/data/code, as ModelTrainer.train() does; the
+        # image's `train` (amt_entrypoint.py) runs sagemaker_program from there. This uploads the stage.
+        trainer.input_data_config = [*trainer.input_data_config, trainer.create_input_data_channel("code", str(stage))]
+        # The sourcedir tarball is uploaded inside tune(), so the stage must outlive this call.
         tuner.tune(wait=False)
         name = check_vpc(tuner)
         print(f"Tuning job: {name}")

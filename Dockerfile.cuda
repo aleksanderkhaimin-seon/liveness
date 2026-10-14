@@ -20,6 +20,10 @@ RUN python -m pip install --no-cache-dir "tensorflow[and-cuda]==2.20.*"
 COPY requirements.txt /tmp/liveness-requirements.txt
 RUN python -m pip install --no-cache-dir -r /tmp/liveness-requirements.txt
 
+# SageMaker automatic model tuning starts the image as `train` and cannot override the entrypoint.
+COPY sagemaker_job/amt_entrypoint.py /usr/local/bin/train
+RUN chmod +x /usr/local/bin/train
+
 EXPOSE 8888 6006
 
 #CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root", "--NotebookApp.token=", "--NotebookApp.password="]

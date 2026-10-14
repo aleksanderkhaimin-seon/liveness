@@ -373,8 +373,10 @@ def build_hyperparameters(
     return hyperparameters
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Launch liveness training as a SageMaker Training Job.")
+def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Launch liveness training as a SageMaker Training Job.", add_help=add_help
+    )
     parser.add_argument("--image-uri", default=DEFAULT_IMAGE)
     parser.add_argument("--role", default=None, help="IAM role ARN. Defaults to the current SageMaker execution role.")
     parser.add_argument("--instance-type", default="ml.g6.4xlarge")
@@ -460,11 +462,23 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Log the job to SageMaker MLflow when an app or tracking server is available.",
     )
-    return parser.parse_args()
+    return parser
 
 
-def main() -> None:
-    args = parse_args()
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
+
+
+def build_trainer(
+    args: argparse.Namespace,
+    header: str = "Submitting SageMaker training job",
+    drop_hyperparameters: tuple[str, ...] = (),
+) -> tuple[ModelTrainer, Path]:
+    """Validate the manifests, stage the source and return the configured ModelTrainer.
+
+    The caller owns the returned stage directory: delete it once the job (or tuning job) has
+    been submitted. `drop_hyperparameters` removes static keys a tuner will search instead.
+    """
     if not args.config.is_file():
         raise FileNotFoundError(f"--config not found: {args.config}")
     config = load_train_config(args.config)
@@ -512,6 +526,9 @@ def main() -> None:
 
     stage, args.config_rel = stage_source(args.config, config, csv_paths)
     try:
+        hyperparameters = build_hyperparameters(config, args, prefixes, prod_prefixes)
+        for key in drop_hyperparameters:
+            hyperparameters.pop(key, None)
         environment = {"PYTHONUNBUFFERED": "1"}
         if mlflow_arn:
             environment["MLFLOW_TRACKING_ARN"] = mlflow_arn
@@ -534,7 +551,7 @@ def main() -> None:
             stopping_condition=StoppingCondition(max_runtime_in_seconds=args.max_run),
             networking=Networking(subnets=subnets, security_group_ids=security_groups),
             output_data_config=OutputDataConfig(s3_output_path=args.output_s3) if args.output_s3 else None,
-            hyperparameters=build_hyperparameters(config, args, prefixes, prod_prefixes),
+            hyperparameters=hyperparameters,
             environment=environment,
             input_data_config=[
                 InputData(
@@ -558,7 +575,7 @@ def main() -> None:
             ],
         )
 
-        print("Submitting SageMaker training job")
+        print(header)
         print(f"  image: {args.image_uri}")
         print(f"  role:  {role}")
         print(f"  instance: {args.instance_type} x {args.instance_count}")
@@ -575,6 +592,16 @@ def main() -> None:
         if mlflow_arn:
             print(f"  mlflow: {mlflow_arn}")
             print(f"  mlflow experiment: {args.mlflow_experiment}")
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return trainer, stage
+
+
+def main() -> None:
+    args = parse_args()
+    trainer, stage = build_trainer(args)
+    try:
         trainer.train(wait=args.wait, logs=args.wait)
         job = trainer._latest_training_job
         if job is not None:

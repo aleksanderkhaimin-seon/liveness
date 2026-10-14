@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -52,6 +53,56 @@ def optional(hps: dict[str, str], key: str) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+# A tuner searches numbers, not the "rescale:0.5,bandstop:0.3" string, so each --freq-aug
+# probability is also accepted as its own hyperparameter and composed here.
+FREQ_AUG_PROB_KEYS = {"rescale": "freq_rescale_p", "bandstop": "freq_bandstop_p", "ampmix": "freq_ampmix_p"}
+FREQ_AUG_MIN_PROB = 0.01  # below this the transform is off: --freq-aug takes P in (0, 1]
+
+
+def freq_aug_from_hps(hps: dict[str, str]) -> str | None:
+    """--freq-aug spec built from freq_*_p hyperparameters; None when none of them is set."""
+    present = {kind: key for kind, key in FREQ_AUG_PROB_KEYS.items() if optional(hps, key) is not None}
+    if not present:
+        return None
+    if optional(hps, "freq_aug") is not None:
+        raise ValueError("Set either freq_aug or the numeric freq_*_p hyperparameters, not both")
+    eta = optional(hps, "freq_ampmix_eta")
+    parts = []
+    for kind, key in present.items():
+        prob = float(optional(hps, key))
+        if prob < FREQ_AUG_MIN_PROB:
+            continue
+        spec = f"{kind}:{min(prob, 1.0):g}"
+        if kind == "ampmix" and eta is not None:
+            spec += f":{float(eta):g}"
+        parts.append(spec)
+    return ",".join(parts)
+
+
+def objective_val_eer(model_dir: Path = SM_MODEL_DIR) -> float | None:
+    """val_eer of the epoch best.keras was saved from, read back from report.json."""
+    report_path = model_dir / "report.json"
+    if not report_path.is_file():
+        return None
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    best = (report.get("checkpoint") or {}).get("best_epoch")
+    values = (report.get("history") or {}).get("val_eer")
+    if best is None or not values or not 0 <= best < len(values):
+        return None
+    value = _as_float(values[best])
+    return value if value is not None and math.isfinite(value) else None
+
+
+def print_objective() -> None:
+    """One unambiguous line for a tuner's metric regex (the per-epoch lines repeat and the last
+    epoch is not the checkpoint)."""
+    value = objective_val_eer()
+    if value is None:
+        print("objective_val_eer unavailable: no val_eer at checkpoint.best_epoch in report.json", flush=True)
+        return
+    print(f"objective_val_eer: {value:.6f}", flush=True)
 
 
 def channel_dir(name: str) -> Path | None:
@@ -204,6 +255,10 @@ def build_command(hps: dict[str, str]) -> list[str]:
         test_csv = resolve_file(optional(hps, "test_csv")) if optional(hps, "test_csv") else None
         if test_csv is not None:
             command.extend(["--test-csv", str(rewrite_csv(test_csv, rewrite_dir / "test.csv", maps))])
+
+    freq_aug = freq_aug_from_hps(hps)
+    if freq_aug is not None:
+        hps = {**hps, "freq_aug": freq_aug}
 
     scalar_flags = {
         "epochs": "--epochs",
@@ -363,6 +418,7 @@ def main() -> None:
     print("Launching:")
     print(" ".join(command))
     subprocess.run(command, check=True)
+    print_objective()
     config_path = staged_config(hps)
     if config_path is not None:
         shutil.copy2(config_path, SM_MODEL_DIR / config_path.name)

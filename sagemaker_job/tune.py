@@ -46,7 +46,7 @@ def default_space(preset: str) -> dict[str, dict]:
     """head: frozen backbone, only the classifier head trains. finetune: backbone trains too."""
     space = {
         "learning_rate": continuous(3e-5, 3e-3, "log"),
-        "batch_size": categorical(16, 32, 64),
+        "batch_size": categorical(32, 64),
         "rot90_prob": continuous(0.0, 0.5),
         **{key: continuous(0.0, 0.7) for key in FREQ_KEYS},
         "augment": categorical("base", "domain"),
@@ -119,6 +119,26 @@ def sdk_ranges(space: dict[str, dict]) -> dict:
         cls, cast = (ContinuousParameter, float) if spec["type"] == "continuous" else (IntegerParameter, int)
         ranges[name] = cls(cast(spec["min"]), cast(spec["max"]), scaling_type=SCALES[spec.get("scale", "linear")])
     return ranges
+
+
+def as_channels(trainer) -> list:
+    """trainer.input_data_config with every InputData turned into a Channel.
+
+    ModelTrainer.train() does this conversion itself. The tuner bypasses it and copies the list
+    into its request as-is, and that request only accepts Channel (pydantic ValidationError).
+    """
+    from sagemaker.core.training.configs import InputData
+
+    channels = []
+    for item in trainer.input_data_config or []:
+        if not isinstance(item, InputData):
+            channels.append(item)
+            continue
+        channel = trainer.create_input_data_channel(item.channel_name, item.data_source)
+        if item.content_type:
+            channel.content_type = item.content_type
+        channels.append(channel)
+    return channels
 
 
 def _field(obj, *names):
@@ -219,7 +239,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--print-space", action="store_true",
                         help="Print the search space and exit. Needs no AWS access.")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Build the trainer and tuner, print them, but do not submit.")
+                        help="Build the trainer and tuner, print them, but do not submit. The tuning "
+                        "request itself is only built inside tune(), so errors there show on a real run.")
     parser.add_argument("--results", metavar="TUNING_JOB_NAME", default=None,
                         help="List the trials of a tuning job, best first, and save them as CSV.")
     parser.add_argument("--results-csv", type=Path, default=None)
@@ -279,6 +300,7 @@ def main() -> None:
     try:
         from sagemaker.train.tuner import HyperparameterTuner
 
+        trainer.input_data_config = as_channels(trainer)
         tuner = HyperparameterTuner(
             model_trainer=trainer,
             objective_metric_name=OBJECTIVE_NAME,

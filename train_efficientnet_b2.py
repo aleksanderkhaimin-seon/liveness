@@ -250,6 +250,17 @@ def read_csv_dataset(
     return image_paths, labels, bboxes
 
 
+def read_media_links(csv_path: Path) -> tuple[list[str], list[str]]:
+    """media_id and parent_media_id per row, in the row order of read_csv_dataset."""
+    with csv_path.open("r", encoding="utf-8", newline="") as file:
+        reader = csv.DictReader(file)
+        missing = [name for name in ("media_id", "parent_media_id") if name not in (reader.fieldnames or [])]
+        if missing:
+            raise ValueError(f"{csv_path} must contain columns {missing} when pair_by_parent is set")
+        rows = [((row["media_id"] or "").strip(), (row["parent_media_id"] or "").strip()) for row in reader]
+    return [media_id for media_id, _ in rows], [parent_id for _, parent_id in rows]
+
+
 def split_indices(labels: list[int], validation_split: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
     labels_array = np.asarray(labels, dtype=np.int32)
@@ -814,19 +825,194 @@ def describe_attack_coverage(labels: list[int], datasets: list[str], batch_size:
     return "\n".join(lines)
 
 
-def make_attack_coverage_dataset(
+def resolve_parent_rows(
+    labels: list[int],
+    media_ids: list[str],
+    parent_ids: list[str],
+) -> tuple[np.ndarray, dict[str, int]]:
+    """parent_of[i] is the row of the live frame attack i was replayed from, or -1.
+
+    A link counts only when the parent is in this same CSV and labelled 0. The
+    others are tallied so the run log shows how much of parent_media_id was usable.
+    """
+    row_of: dict[str, int] = {}
+    duplicate_ids = 0
+    for row, media_id in enumerate(media_ids):
+        if not media_id:
+            continue
+        if media_id in row_of:
+            duplicate_ids += 1
+        else:
+            row_of[media_id] = row
+
+    parent_of = np.full(len(labels), -1, dtype=np.int64)
+    counts = {"with_parent_id": 0, "linked": 0, "parent_not_in_csv": 0, "parent_not_live": 0,
+              "duplicate_media_ids": duplicate_ids}
+    for row, parent_id in enumerate(parent_ids):
+        if labels[row] != 1 or not parent_id:
+            continue
+        counts["with_parent_id"] += 1
+        parent_row = row_of.get(parent_id)
+        if parent_row is None:
+            counts["parent_not_in_csv"] += 1
+        elif labels[parent_row] != 0:
+            counts["parent_not_live"] += 1
+        else:
+            parent_of[row] = parent_row
+            counts["linked"] += 1
+    return parent_of, counts
+
+
+def plan_parent_pair_batches(
+    labels: list[int],
+    parent_of: np.ndarray,
+    batch_size: int,
+    seed: int,
+    n_batches: int | None = None,
+) -> np.ndarray:
+    """Row indices of shape (n_batches, batch_size).
+
+    A live frame and the attacks replayed from it land in the same batch. Every
+    row is used once per epoch, so class balance matches the CSV; only the order
+    and the batch composition change. Rows without a link fill the remaining slots,
+    steered toward the CSV's attack share so batches stay balanced. A group wider
+    than a batch is cut into pieces that each repeat the live frame.
+
+    Whole groups cannot always tile a batch (six-row groups in 32 slots), so the
+    plan may need more than ceil(n_rows / batch_size) batches; the spare slots are
+    padded with repeated rows. Leave n_batches unset to get the natural count, then
+    pass it back so every epoch has the same length.
+    """
+    if batch_size < 2:
+        raise ValueError(f"batch_size must be at least 2, got {batch_size}")
+    labels_array = np.asarray(labels, dtype=np.int32)
+    n_rows = len(labels_array)
+    min_batches = -(-n_rows // batch_size)
+    rng = np.random.default_rng(seed)
+
+    kids_of: dict[int, list[int]] = {}
+    for child in np.flatnonzero(parent_of >= 0):
+        kids_of.setdefault(int(parent_of[child]), []).append(int(child))
+    grouped = np.zeros(n_rows, dtype=bool)
+    units: list[list[int]] = []
+    for parent, kids in kids_of.items():
+        grouped[parent] = True
+        grouped[kids] = True
+        rng.shuffle(kids)
+        for start in range(0, len(kids), batch_size - 1):
+            units.append([parent, *kids[start:start + batch_size - 1]])
+    units = [units[i] for i in rng.permutation(len(units))]
+    units.sort(key=len, reverse=True)  # stable: big groups first, small ones fill the gaps
+
+    start_batches = max(min_batches, n_batches or 0)
+    batches: list[list[int]] = [[] for _ in range(start_batches)]
+    members: list[set[int]] = [set() for _ in range(start_batches)]
+    cursor = 0
+    for unit in units:
+        for probe in range(min(16, len(batches))):
+            k = (cursor + probe) % len(batches)
+            new = [row for row in unit if row not in members[k]]
+            if len(batches[k]) + len(new) <= batch_size:
+                batches[k].extend(new)
+                members[k].update(new)
+                cursor = k if k >= start_batches else k + 1  # round-robin, but keep filling an overflow batch
+                break
+        else:
+            batches.append(list(unit))
+            members.append(set(unit))
+            cursor = len(batches) - 1  # the next unit tries this new batch first
+
+    pools = {
+        label: [int(i) for i in rng.permutation(np.flatnonzero((labels_array == label) & ~grouped))]
+        for label in (0, 1)
+    }
+    spare = {label: [int(i) for i in rng.permutation(np.flatnonzero(labels_array == label))] for label in (0, 1)}
+    spare_pos = {0: 0, 1: 0}
+    attack_share = float(labels_array.mean())
+
+    def repeat_row(label: int, seen: set[int]) -> int:
+        for candidate_label in (label, 1 - label):
+            pool = spare[candidate_label]
+            for _ in range(len(pool)):
+                candidate = pool[spare_pos[candidate_label] % len(pool)]
+                spare_pos[candidate_label] += 1
+                if candidate not in seen:
+                    return candidate
+        raise ValueError(f"Could not pad a batch of {batch_size} without repeating a row inside it")
+
+    def add_one(k: int) -> None:
+        batch = batches[k]
+        n_attacks = int(labels_array[batch].sum()) if batch else 0
+        label = 1 if n_attacks < attack_share * (len(batch) + 1) else 0
+        if not pools[label] and pools[1 - label]:
+            label = 1 - label
+        row = pools[label].pop() if pools[label] else repeat_row(label, members[k])
+        batch.append(row)
+        members[k].add(row)
+
+    # One slot per batch per round, so unlinked rows (and any padding) spread evenly.
+    while True:
+        open_batches = [k for k in range(len(batches)) if len(batches[k]) < batch_size]
+        if open_batches:
+            for k in open_batches:
+                add_one(k)
+        elif pools[0] or pools[1]:
+            batches.append([])
+            members.append(set())
+        else:
+            break
+
+    order = rng.permutation(len(batches))[:n_batches]  # n_batches=None keeps all
+    plan = np.asarray([batches[k] for k in order], dtype=np.int64)
+    return rng.permuted(plan, axis=1)
+
+
+def parent_pair_steps(labels: list[int], parent_of: np.ndarray, batch_size: int, seed: int) -> int:
+    return len(plan_parent_pair_batches(labels, parent_of, batch_size, seed))
+
+
+def describe_parent_pairs(
+    labels: list[int],
+    parent_of: np.ndarray,
+    counts: dict[str, int],
+    batch_size: int,
+    seed: int,
+) -> str:
+    plan = plan_parent_pair_batches(labels, parent_of, batch_size, seed)
+    linked = parent_of >= 0
+    n_linked = int(linked.sum())
+    together = 0
+    for batch in plan:
+        rows = set(batch.tolist())
+        together += sum(1 for row in rows if parent_of[row] >= 0 and int(parent_of[row]) in rows)
+    parents, kids_per_parent = np.unique(parent_of[linked], return_counts=True)
+    visited = len(np.unique(plan))
+    lines = [
+        f"Parent pairing: {sum(labels)} attacks, {counts['with_parent_id']} carry a parent_media_id; "
+        f"{n_linked} linked to one of {len(parents)} live frames in this CSV "
+        f"(up to {int(kids_per_parent.max())} attacks per live frame)",
+        f"  not usable: {counts['parent_not_in_csv']} parent not in this CSV, "
+        f"{counts['parent_not_live']} parent not labelled live, {counts['duplicate_media_ids']} duplicate media_ids",
+        f"  {len(plan)} steps of {batch_size}; {together}/{n_linked} linked attacks share a batch with their live frame; "
+        f"{plan.size - visited} repeated rows, {len(labels) - visited} rows unused per epoch",
+    ]
+    return "\n".join(lines)
+
+
+def make_planned_dataset(
     paths: list[str],
     labels: list[int],
     bboxes: list[str],
-    datasets: list[str],
     batch_size: int,
+    n_batches: int,
+    plan_epoch,
     use_bbox_crop: bool,
     margin: float,
     bbox_aug_prob: float,
     seed: int,
 ) -> tf.data.Dataset:
-    """Infinite dataset. Each epoch is a fresh plan; fit must set steps_per_epoch."""
-    n_batches = len(paths) // batch_size
+    """Infinite dataset. `plan_epoch(seed)` returns the (n_batches, batch_size) row
+    indices of one epoch, with a fresh seed each epoch; fit must set steps_per_epoch."""
     epoch_length = n_batches * batch_size
     path_t = tf.constant(paths)
     label_t = tf.constant(labels, dtype=tf.int32)
@@ -835,7 +1021,7 @@ def make_attack_coverage_dataset(
     def epochs():
         epoch_seed = seed
         while True:
-            plan = plan_attack_coverage_batches(labels, datasets, batch_size, epoch_seed)
+            plan = plan_epoch(epoch_seed)
             epoch_seed += 1
             yield plan.reshape(-1).astype(np.int64)
 
@@ -855,6 +1041,31 @@ def make_attack_coverage_dataset(
     return batch_training(dataset, batch_size, drop_remainder=True)
 
 
+def make_attack_coverage_dataset(
+    paths: list[str],
+    labels: list[int],
+    bboxes: list[str],
+    datasets: list[str],
+    batch_size: int,
+    use_bbox_crop: bool,
+    margin: float,
+    bbox_aug_prob: float,
+    seed: int,
+) -> tf.data.Dataset:
+    return make_planned_dataset(
+        paths,
+        labels,
+        bboxes,
+        batch_size,
+        len(paths) // batch_size,
+        lambda epoch_seed: plan_attack_coverage_batches(labels, datasets, batch_size, epoch_seed),
+        use_bbox_crop,
+        margin,
+        bbox_aug_prob,
+        seed,
+    )
+
+
 def make_dataset(
     paths: list[str],
     labels: list[int],
@@ -868,12 +1079,31 @@ def make_dataset(
     cover_attack_datasets: bool = False,
     seed: int = 0,
     rotate: int = 0,
+    parent_of: np.ndarray | None = None,
 ) -> tf.data.Dataset:
-    """`rotate`: fixed counter-clockwise rotation in degrees after the bbox crop, for re-scoring."""
+    """`rotate`: fixed counter-clockwise rotation in degrees after the bbox crop, for re-scoring.
+    `parent_of`: per-row live-frame index from resolve_parent_rows; batches keep each live frame
+    with the attacks replayed from it (training only)."""
     if rotate not in ROTATIONS:
         raise ValueError(f"rotate must be one of {ROTATIONS}, got {rotate}")
     if rotate and training:
         raise ValueError("rotate is for scoring; use rot90_prob to rotate training frames")
+    if training and cover_attack_datasets and parent_of is not None:
+        raise ValueError("cover_attack_datasets and pair_by_parent both plan the batches; set only one")
+    if training and parent_of is not None:
+        n_pair_batches = parent_pair_steps(labels, parent_of, batch_size, seed)
+        return make_planned_dataset(
+            paths,
+            labels,
+            bboxes,
+            batch_size,
+            n_pair_batches,
+            lambda epoch_seed: plan_parent_pair_batches(labels, parent_of, batch_size, epoch_seed, n_pair_batches),
+            use_bbox_crop,
+            margin,
+            bbox_aug_prob,
+            seed,
+        )
     if training and cover_attack_datasets:
         if datasets is None:
             raise ValueError("cover_attack_datasets requires a dataset name for every training row")
@@ -1146,6 +1376,7 @@ BOOL_KEYS = (
     "mixed_precision",
     "use_bbox_crop",
     "cover_attack_datasets",
+    "pair_by_parent",
 )
 CONFIG_DEFAULTS = {
     "csv": Path("test_df.csv"),
@@ -1168,6 +1399,7 @@ CONFIG_DEFAULTS = {
     "bbox_aug_prob": 0.0,
     "rot90_prob": 0.0,
     "cover_attack_datasets": False,
+    "pair_by_parent": False,
     "degrade": "",
     "augment": "base",
     "freq_aug": "",
@@ -1258,6 +1490,13 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Every training batch includes one attack from each dataset that has label-1 rows.",
+    )
+    parser.add_argument(
+        "--pair-by-parent",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Put each live frame in the same training batch as the attacks replayed from it, using the CSV's "
+        "media_id and parent_media_id columns. Not combinable with --cover-attack-datasets.",
     )
     parser.add_argument(
         "--degrade",
@@ -1423,6 +1662,8 @@ def main() -> None:
                 f"{args.degrade!r} needs one for every row"
             )
 
+    if args.pair_by_parent and args.cover_attack_datasets:
+        raise SystemExit("--pair-by-parent and --cover-attack-datasets both plan the batches; use one")
     loaded = read_csv_dataset(
         args.csv,
         require_bbox=require_bbox,
@@ -1433,12 +1674,20 @@ def main() -> None:
     else:
         paths, labels, bboxes = loaded
         datasets = None
+    media_ids = parent_ids = None
+    if args.pair_by_parent:
+        try:
+            media_ids, parent_ids = read_media_links(args.csv)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
     check_degrade_bboxes(args.csv, bboxes)
     if args.validation_csv:
         train_paths = paths
         train_labels = labels
         train_bboxes = bboxes
         train_datasets = datasets
+        train_media_ids = media_ids
+        train_parent_ids = parent_ids
         validation_paths, validation_labels, validation_bboxes = read_csv_dataset(
             args.validation_csv,
             require_bbox=require_bbox,
@@ -1451,6 +1700,8 @@ def main() -> None:
         train_labels = [labels[index] for index in train_indices]
         train_bboxes = [bboxes[index] for index in train_indices]
         train_datasets = [datasets[index] for index in train_indices] if datasets is not None else None
+        train_media_ids = [media_ids[index] for index in train_indices] if media_ids is not None else None
+        train_parent_ids = [parent_ids[index] for index in train_indices] if parent_ids is not None else None
         validation_paths = [paths[index] for index in validation_indices]
         validation_labels = [labels[index] for index in validation_indices]
         validation_bboxes = [bboxes[index] for index in validation_indices]
@@ -1458,6 +1709,17 @@ def main() -> None:
 
     if args.cover_attack_datasets:
         print(describe_attack_coverage(train_labels, train_datasets, args.batch_size))
+    parent_of = None
+    if args.pair_by_parent:
+        parent_of, link_counts = resolve_parent_rows(train_labels, train_media_ids, train_parent_ids)
+        if link_counts["linked"] == 0:
+            # Refuse rather than train an unpaired run that is logged as paired.
+            raise SystemExit(
+                f"--pair-by-parent: no attack in {args.csv} links to a live frame in the same CSV "
+                f"({link_counts['with_parent_id']} have a parent_media_id, "
+                f"{link_counts['parent_not_in_csv']} point outside it, {link_counts['parent_not_live']} point at a label-1 row)"
+            )
+        print(describe_parent_pairs(train_labels, parent_of, link_counts, args.batch_size, args.seed))
     train_dataset = make_dataset(
         train_paths,
         train_labels,
@@ -1470,6 +1732,7 @@ def main() -> None:
         datasets=train_datasets,
         cover_attack_datasets=args.cover_attack_datasets,
         seed=args.seed,
+        parent_of=parent_of,
     )
     validation_dataset = make_dataset(
         validation_paths,
@@ -1505,6 +1768,8 @@ def main() -> None:
 
     if args.cover_attack_datasets:
         train_steps_per_epoch = len(train_paths) // args.batch_size
+    elif args.pair_by_parent:
+        train_steps_per_epoch = parent_pair_steps(train_labels, parent_of, args.batch_size, args.seed)
     else:
         train_steps_per_epoch = int(np.ceil(len(train_paths) / args.batch_size))
     decay_steps = train_steps_per_epoch * args.epochs
@@ -1531,7 +1796,7 @@ def main() -> None:
         train_dataset,
         validation_data=validation_dataset,
         epochs=args.epochs,
-        steps_per_epoch=train_steps_per_epoch if args.cover_attack_datasets else None,
+        steps_per_epoch=train_steps_per_epoch if args.cover_attack_datasets or args.pair_by_parent else None,
         callbacks=callbacks,
         class_weight=class_weight(train_labels),
     )

@@ -1,0 +1,9 @@
+# Thin layer over the image every earlier job ran on (the digest pinned in sagemaker_job/launch.py).
+# It adds only the `train` executable SageMaker automatic model tuning needs and re-resolves no
+# dependencies, so results stay comparable with earlier runs. Build from the repo root:
+#   docker build --platform linux/amd64 -f Dockerfile.amt -t <ecr-repo>:amt .
+ARG BASE_IMAGE=335010339905.dkr.ecr.eu-central-1.amazonaws.com/idv-ml/liveness-cuda@sha256:0bc45d1ed84f7492c3b563d562a154c5044a2eabad1d3c7642dfc6fb27446da7
+FROM ${BASE_IMAGE}
+
+COPY sagemaker_job/amt_entrypoint.py /usr/local/bin/train
+RUN chmod +x /usr/local/bin/train

@@ -293,7 +293,7 @@ def build_command(hps: dict[str, str]) -> list[str]:
         "mixed_precision": ("--mixed-precision", "--no-mixed-precision"),
         "use_bbox_crop": ("--use-bbox-crop", "--no-use-bbox-crop"),
         "cover_attack_datasets": ("--cover-attack-datasets", "--no-cover-attack-datasets"),
-        "pair_by_parent": ("--pair-by-parent", "--no-pair-by-parent"),
+        "pair_by_source": ("--pair-by-source", "--no-pair-by-source"),
     }
     for key, (on_flag, off_flag) in bool_flags.items():
         if key not in hps:

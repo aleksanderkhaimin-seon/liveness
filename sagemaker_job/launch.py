@@ -308,7 +308,7 @@ def build_hyperparameters(
         "bbox_aug_prob",
         "rot90_prob",
         "cover_attack_datasets",
-        "pair_by_parent",
+        "pair_by_source",
         "degrade",
         "augment",
         "freq_aug",
@@ -338,7 +338,7 @@ def build_hyperparameters(
         "bbox_aug_prob": args.bbox_aug_prob,
         "rot90_prob": getattr(args, "rot90_prob", None),
         "cover_attack_datasets": getattr(args, "cover_attack_datasets", None),
-        "pair_by_parent": getattr(args, "pair_by_parent", None),
+        "pair_by_source": getattr(args, "pair_by_source", None),
         "degrade": getattr(args, "degrade", None),
         "augment": getattr(args, "augment", None),
         "freq_aug": getattr(args, "freq_aug", None),
@@ -417,9 +417,9 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--bbox-aug-prob", type=float)
     parser.add_argument("--cover-attack-datasets", action=argparse.BooleanOptionalAction, default=None,
                         help="One attack from each attack dataset in every batch. Overrides the config's cover_attack_datasets.")
-    parser.add_argument("--pair-by-parent", action=argparse.BooleanOptionalAction, default=None,
+    parser.add_argument("--pair-by-source", action=argparse.BooleanOptionalAction, default=None,
                         help="Keep each live frame in the same batch as the attacks replayed from it (media_id / "
-                        "parent_media_id columns). Overrides the config's pair_by_parent.")
+                        "source_media_id columns). Overrides the config's pair_by_source.")
     parser.add_argument("--rot90-prob", type=float, default=None,
                         help="Probability of a quarter-turn rotation of each training frame. Overrides the config's rot90_prob.")
     parser.add_argument(

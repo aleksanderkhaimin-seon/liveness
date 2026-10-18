@@ -290,6 +290,16 @@ The script writes:
 - `eer`
 - `eer_threshold`
 
+## Checkpoint Averaging
+
+`average_checkpoints.py` averages the weights of several checkpoints from one run into a new `.keras` file (SWA-style). Averaging over the late part of training tends to generalise better to unfamiliar data than any single epoch. It also removes the epoch-to-epoch swings in prod EER, so the best epoch no longer has to be picked on prod.
+
+Float variables are averaged, including BatchNorm statistics. Integer state is copied from the last checkpoint. `--bn-csv` re-estimates BatchNorm statistics on training frames instead of averaging them, as SWA does. The output is a normal checkpoint without optimizer state (32 MB), usable by `predict_checkpoint_csv.py`, `convert_checkpoint_to_onnx.py` and `launch_eval.py --checkpoint`. Keep it inside the run folder so the run's `report.json` is found for the input geometry.
+
+```bash
+python average_checkpoints.py runs/x/checkpoints/epoch_002_*.keras runs/x/checkpoints/epoch_003_*.keras --output runs/x/averaged/avg_e2_e3.keras
+```
+
 ## Convert Checkpoint To ONNX
 
 Convert the best checkpoint into a model folder like `models/m1`:

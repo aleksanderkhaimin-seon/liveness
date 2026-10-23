@@ -79,6 +79,17 @@ def instance_has_gpu(instance_type: str) -> bool:
     return family in GPU_INSTANCE_FAMILIES
 
 
+# Mirrors train_efficientnet_b2.parse_augment, checked here so a typo fails before the job is submitted.
+AUGMENT_TOKENS = ("base", "domain", "color", "degrade", "geom")
+
+
+def augment_spec(text: str) -> str:
+    tokens = [token.strip().lower() for token in text.split("+") if token.strip()]
+    if not tokens or any(token not in AUGMENT_TOKENS for token in tokens):
+        raise argparse.ArgumentTypeError(f"expected base, domain or groups from color, degrade, geom joined with '+', got {text!r}")
+    return "+".join(tokens)
+
+
 def stringify(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -350,6 +361,11 @@ def build_hyperparameters(
     for key, value in cli_overrides.items():
         if value is not None:
             hyperparameters[key] = stringify(value)
+    if "augment" in hyperparameters:  # the CLI flag is checked by argparse; this also covers the config key
+        try:
+            hyperparameters["augment"] = augment_spec(hyperparameters["augment"])
+        except argparse.ArgumentTypeError as error:
+            raise SystemExit(f"augment: {error}") from error
 
     hyperparameters["config"] = stringify(Path(args.config_rel).as_posix())
     hyperparameters["strip_path_prefix"] = args.strip_path_prefix or "|".join(prefixes)
@@ -428,8 +444,9 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         help="Anonymisation degradations for train_efficientnet_b2.py, e.g. mask:0.05,downscale:192. "
         "Overrides the config's degrade key.",
     )
-    parser.add_argument("--augment", default=None, choices=("base", "domain"),
-                        help="Training augmentation preset (training default: base).")
+    parser.add_argument("--augment", default=None, type=augment_spec,
+                        help="Training augmentation (training default: base): base, domain, or domain groups "
+                        "joined with '+' from color, degrade, geom, e.g. color+degrade.")
     parser.add_argument("--freq-aug", default=None,
                         help="Training-only frequency augmentations, e.g. rescale:0.5,bandstop:0.3,ampmix:0.5. "
                         "Overrides the config's freq_aug key.")

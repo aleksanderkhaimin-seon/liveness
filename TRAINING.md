@@ -228,6 +228,16 @@ Training uses `albumentations` in the `tf.data` input pipeline:
 - affine scale from `0.92` to `1.08`
 - brightness multiplier from `0.8` to `1.2`
 
+That is `--augment base` (the default). `--augment domain` adds capture-condition variation in three groups. Each group can be enabled on its own or joined with `+` (for example `--augment color+degrade`) to measure what it contributes:
+
+| group | transforms |
+|---|---|
+| `color` | brightness/contrast or gamma (p 0.8), hue/saturation or RGB shift (p 0.6), shadow (p 0.2) |
+| `degrade` | Gaussian, motion or defocus blur (p 0.3), Gaussian noise (p 0.3), JPEG (p 0.4) |
+| `geom` | perspective, scale 0.02–0.08 (p 0.3) |
+
+`domain` is the same as `color+degrade+geom`: the same transforms in the same order as before the split, so earlier `domain` runs stay comparable. `report.json` records the groups under `augment_groups`.
+
 Validation, testing, checkpoint conversion, and ONNX inference do not include augmentations.
 
 ### Frequency augmentations

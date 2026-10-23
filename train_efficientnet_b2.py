@@ -89,40 +89,65 @@ _BASE_AUGMENTATIONS = [
 # production, not fine texture. Applied after the resize, so blur and noise act
 # at network-input scale. Only albumentations arguments that are stable across
 # 1.x and 2.x are used.
+#
+# Each transform belongs to one group, so the preset can be ablated:
+#   color    brightness/contrast or gamma, hue/saturation or RGB shift, shadow
+#   degrade  blur (Gaussian / motion / defocus), Gaussian noise, JPEG
+#   geom     perspective
+# A selection keeps this list's order, so "domain" (all groups) is exactly the
+# preset used before the split.
 _DOMAIN_AUGMENTATIONS = [
-    A.OneOf(
+    ("color", A.OneOf(
         [
             A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=1.0),
             A.RandomGamma(gamma_limit=(70, 140), p=1.0),
         ],
         p=0.8,
-    ),
-    A.OneOf(
+    )),
+    ("color", A.OneOf(
         [
             A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=30, val_shift_limit=20, p=1.0),
             A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=1.0),
         ],
         p=0.6,
-    ),
-    A.OneOf([A.GaussianBlur(p=1.0), A.MotionBlur(p=1.0), A.Defocus(p=1.0)], p=0.3),
-    A.GaussNoise(p=0.3),
-    A.ImageCompression(p=0.4),
-    A.Perspective(scale=(0.02, 0.08), p=0.3),
-    A.RandomShadow(p=0.2),
+    )),
+    ("degrade", A.OneOf([A.GaussianBlur(p=1.0), A.MotionBlur(p=1.0), A.Defocus(p=1.0)], p=0.3)),
+    ("degrade", A.GaussNoise(p=0.3)),
+    ("degrade", A.ImageCompression(p=0.4)),
+    ("geom", A.Perspective(scale=(0.02, 0.08), p=0.3)),
+    ("color", A.RandomShadow(p=0.2)),
 ]
-
-AUGMENT_PRESETS = {
-    "base": _BASE_AUGMENTATIONS,
-    "domain": _BASE_AUGMENTATIONS + _DOMAIN_AUGMENTATIONS,
-}
-AUGMENTER = A.Compose(AUGMENT_PRESETS["base"])
+DOMAIN_GROUPS = ("color", "degrade", "geom")
 
 
-def set_augment_preset(name: str) -> None:
+def parse_augment(spec: str) -> tuple[str, ...]:
+    """Domain groups selected by an --augment spec, in DOMAIN_GROUPS order.
+
+    `base` = flip/affine/multiplicative noise only; `domain` = base + every group;
+    otherwise base + the groups joined with '+', e.g. `color` or `color+degrade`.
+    """
+    tokens = [token.strip().lower() for token in spec.split("+") if token.strip()]
+    allowed = ("base", "domain", *DOMAIN_GROUPS)
+    unknown = [token for token in tokens if token not in allowed]
+    if not tokens or unknown:
+        raise ValueError(f"augment must be base, domain or groups from {DOMAIN_GROUPS} joined with '+', got {spec!r}")
+    if "domain" in tokens:
+        return DOMAIN_GROUPS
+    return tuple(group for group in DOMAIN_GROUPS if group in tokens)
+
+
+def augment_transforms(groups: tuple[str, ...]) -> list:
+    return _BASE_AUGMENTATIONS + [transform for group, transform in _DOMAIN_AUGMENTATIONS if group in groups]
+
+
+AUGMENTER = A.Compose(augment_transforms(()))
+
+
+def set_augment_preset(spec: str) -> tuple[str, ...]:
     global AUGMENTER
-    if name not in AUGMENT_PRESETS:
-        raise ValueError(f"augment must be one of {sorted(AUGMENT_PRESETS)}, got {name!r}")
-    AUGMENTER = A.Compose(AUGMENT_PRESETS[name])
+    groups = parse_augment(spec)
+    AUGMENTER = A.Compose(augment_transforms(groups))
+    return groups
 
 
 def configure_runtime(require_gpu: bool, mixed_precision: bool) -> None:
@@ -1528,7 +1553,13 @@ def parse_args() -> argparse.Namespace:
         help="Validation metric that selects best.keras. Default val_eer: validation is production "
         "data and EER is the metric acted on; val_auc peaked at epoch 0 in most runs while EER did not.",
     )
-    parser.add_argument("--augment", choices=sorted(AUGMENT_PRESETS), help="Training augmentation preset: base (flip/affine/noise) or domain (adds photometric, blur, noise, JPEG, perspective, shadow).")
+    parser.add_argument(
+        "--augment",
+        type=str,
+        help="Training augmentation: base (flip/affine/noise), domain (base + every group), or base plus domain "
+        "groups joined with '+': color (brightness/contrast/gamma, hue/RGB shift, shadow), degrade (blur, "
+        "noise, JPEG), geom (perspective). E.g. color, color+degrade.",
+    )
     parser.add_argument(
         "--freq-aug",
         type=str,
@@ -1639,8 +1670,11 @@ def main() -> None:
     except ValueError as error:
         raise SystemExit(str(error)) from error
     print(f"Input geometry: {IMAGE_SIZE}x{IMAGE_SIZE}, {RESIZE_MODE}")
-    set_augment_preset(args.augment)
-    print(f"Augmentation preset: {args.augment}")
+    try:
+        augment_groups = set_augment_preset(args.augment)
+    except ValueError as error:
+        raise SystemExit(f"--augment: {error}") from error
+    print(f"Augmentation preset: {args.augment} (domain groups: {', '.join(augment_groups) or 'none'})")
 
     try:
         DEGRADATIONS[:] = parse_degrade(args.degrade or "")
@@ -1855,6 +1889,7 @@ def main() -> None:
             "aug_prob": args.bbox_aug_prob,
         },
         "rot90_prob": ROT90_PROB,
+        "augment_groups": list(augment_groups),
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
         "freq_aug": [
             {"kind": kind, "prob": prob, **({"eta": param} if kind == "ampmix" else {})}

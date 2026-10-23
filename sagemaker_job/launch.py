@@ -80,13 +80,13 @@ def instance_has_gpu(instance_type: str) -> bool:
 
 
 # Mirrors train_efficientnet_b2.parse_augment, checked here so a typo fails before the job is submitted.
-AUGMENT_TOKENS = ("base", "domain", "color", "degrade", "geom")
+AUGMENT_TOKENS = ("base", "domain", "color", "degrade", "geom", "camera", "scale")
 
 
 def augment_spec(text: str) -> str:
     tokens = [token.strip().lower() for token in text.split("+") if token.strip()]
     if not tokens or any(token not in AUGMENT_TOKENS for token in tokens):
-        raise argparse.ArgumentTypeError(f"expected base, domain or groups from color, degrade, geom joined with '+', got {text!r}")
+        raise argparse.ArgumentTypeError(f"expected base, domain or groups from color, degrade, geom, camera, scale joined with '+', got {text!r}")
     return "+".join(tokens)
 
 
@@ -445,8 +445,8 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         "Overrides the config's degrade key.",
     )
     parser.add_argument("--augment", default=None, type=augment_spec,
-                        help="Training augmentation (training default: base): base, domain, or domain groups "
-                        "joined with '+' from color, degrade, geom, e.g. color+degrade.")
+                        help="Training augmentation (training default: base): base, domain (= color+degrade+geom), "
+                        "or groups joined with '+' from color, degrade, geom, camera, scale, e.g. domain+camera+scale.")
     parser.add_argument("--freq-aug", default=None,
                         help="Training-only frequency augmentations, e.g. rescale:0.5,bandstop:0.3,ampmix:0.5. "
                         "Overrides the config's freq_aug key.")

@@ -94,9 +94,13 @@ _BASE_AUGMENTATIONS = [
 #   color    brightness/contrast or gamma, hue/saturation or RGB shift, shadow
 #   degrade  blur (Gaussian / motion / defocus), Gaussian noise, JPEG
 #   geom     perspective
-# A selection keeps this list's order, so "domain" (all groups) is exactly the
-# preset used before the split.
-_DOMAIN_AUGMENTATIONS = [
+#   camera   white balance, tone curve, sharpening, sensor noise, local contrast --
+#            what phone image processing does differently from device to device
+#            (placed before JPEG, as a camera compresses last)
+# "domain" is color+degrade+geom. A selection keeps this list's order, so
+# "domain" is exactly the preset used before the split. A sixth group, scale, is
+# not an albumentations transform: see DOC_SCALE_PROB.
+_GROUP_AUGMENTATIONS = [
     ("color", A.OneOf(
         [
             A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=1.0),
@@ -113,40 +117,56 @@ _DOMAIN_AUGMENTATIONS = [
     )),
     ("degrade", A.OneOf([A.GaussianBlur(p=1.0), A.MotionBlur(p=1.0), A.Defocus(p=1.0)], p=0.3)),
     ("degrade", A.GaussNoise(p=0.3)),
+    ("camera", A.PlanckianJitter(mode="blackbody", temperature_limit=(4000, 9000), p=0.3)),
+    ("camera", A.RandomToneCurve(scale=0.1, p=0.3)),
+    ("camera", A.Sharpen(alpha=(0.1, 0.3), lightness=(0.9, 1.1), p=0.3)),
+    ("camera", A.ISONoise(p=0.3)),
+    ("camera", A.CLAHE(clip_limit=(1, 2), p=0.1)),
     ("degrade", A.ImageCompression(p=0.4)),
     ("geom", A.Perspective(scale=(0.02, 0.08), p=0.3)),
     ("color", A.RandomShadow(p=0.2)),
 ]
 DOMAIN_GROUPS = ("color", "degrade", "geom")
+AUGMENT_GROUPS = (*DOMAIN_GROUPS, "camera", "scale")
+
+# Document size in the frame (group "scale", training only). In production the
+# document spans ~84% of the frame's long axis for both classes (p10-p90 0.66-0.94);
+# in training scraped lives fill ~96% and replays ~60-72%, so the amount of
+# background tracks the source. With probability DOC_SCALE_PROB a frame that has a
+# bbox is cropped -- keeping its aspect ratio and the whole document -- so that the
+# document spans a random share in DOC_SCALE_SHARE of it. Frames already at or above
+# the drawn share are left alone: zooming out would need padding.
+DOC_SCALE_PROB = 0.0
+DOC_SCALE_SHARE = (0.6, 0.95)
 
 
 def parse_augment(spec: str) -> tuple[str, ...]:
-    """Domain groups selected by an --augment spec, in DOMAIN_GROUPS order.
+    """Groups selected by an --augment spec, in AUGMENT_GROUPS order.
 
-    `base` = flip/affine/multiplicative noise only; `domain` = base + every group;
-    otherwise base + the groups joined with '+', e.g. `color` or `color+degrade`.
+    `base` = flip/affine/multiplicative noise only; `domain` = color+degrade+geom;
+    groups are joined with '+', e.g. `color`, `color+degrade`, `domain+camera+scale`.
     """
     tokens = [token.strip().lower() for token in spec.split("+") if token.strip()]
-    allowed = ("base", "domain", *DOMAIN_GROUPS)
+    allowed = ("base", "domain", *AUGMENT_GROUPS)
     unknown = [token for token in tokens if token not in allowed]
     if not tokens or unknown:
-        raise ValueError(f"augment must be base, domain or groups from {DOMAIN_GROUPS} joined with '+', got {spec!r}")
-    if "domain" in tokens:
-        return DOMAIN_GROUPS
-    return tuple(group for group in DOMAIN_GROUPS if group in tokens)
+        raise ValueError(f"augment must be base, domain or groups from {AUGMENT_GROUPS} joined with '+', got {spec!r}")
+    selected = set(tokens) | (set(DOMAIN_GROUPS) if "domain" in tokens else set())
+    return tuple(group for group in AUGMENT_GROUPS if group in selected)
 
 
 def augment_transforms(groups: tuple[str, ...]) -> list:
-    return _BASE_AUGMENTATIONS + [transform for group, transform in _DOMAIN_AUGMENTATIONS if group in groups]
+    return _BASE_AUGMENTATIONS + [transform for group, transform in _GROUP_AUGMENTATIONS if group in groups]
 
 
 AUGMENTER = A.Compose(augment_transforms(()))
 
 
 def set_augment_preset(spec: str) -> tuple[str, ...]:
-    global AUGMENTER
+    global AUGMENTER, DOC_SCALE_PROB
     groups = parse_augment(spec)
     AUGMENTER = A.Compose(augment_transforms(groups))
+    DOC_SCALE_PROB = 0.5 if "scale" in groups else 0.0
     return groups
 
 
@@ -362,6 +382,38 @@ def crop_by_bbox(image: tf.Tensor, bbox: tf.Tensor, margin: float) -> tf.Tensor:
 
     has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
     return tf.cond(has_bbox, crop, lambda: image)
+
+
+def random_document_crop(image: tf.Tensor, bbox: tf.Tensor) -> tf.Tensor:
+    """Crop to the frame's aspect ratio around the whole document so that it spans a share drawn
+    from DOC_SCALE_SHARE of the crop (on its tighter axis); no-op if it already spans that much."""
+    shape = tf.shape(image)
+    frame_h = tf.cast(shape[0], tf.float32)
+    frame_w = tf.cast(shape[1], tf.float32)
+    x1, y1, x2, y2 = tf.unstack(tf.ensure_shape(parse_bbox(bbox), [4]), num=4)
+    x1 = tf.clip_by_value(x1, 0.0, frame_w)
+    x2 = tf.clip_by_value(x2, 0.0, frame_w)
+    y1 = tf.clip_by_value(y1, 0.0, frame_h)
+    y2 = tf.clip_by_value(y2, 0.0, frame_h)
+    doc_w = x2 - x1
+    doc_h = y2 - y1
+    share = tf.maximum(doc_w / frame_w, doc_h / frame_h)
+    target = tf.random.uniform((), DOC_SCALE_SHARE[0], DOC_SCALE_SHARE[1])
+
+    def crop() -> tf.Tensor:
+        scale = share / target
+        crop_w = frame_w * scale
+        crop_h = frame_h * scale
+        # Any position that keeps the document inside the crop and the crop inside the frame.
+        left = tf.random.uniform((), tf.maximum(0.0, x2 - crop_w), tf.minimum(x1, frame_w - crop_w))
+        top = tf.random.uniform((), tf.maximum(0.0, y2 - crop_h), tf.minimum(y1, frame_h - crop_h))
+        offset_x = tf.cast(tf.floor(left), tf.int32)
+        offset_y = tf.cast(tf.floor(top), tf.int32)
+        width = tf.clip_by_value(tf.cast(tf.math.ceil(crop_w), tf.int32), 1, shape[1] - offset_x)
+        height = tf.clip_by_value(tf.cast(tf.math.ceil(crop_h), tf.int32), 1, shape[0] - offset_y)
+        return tf.image.crop_to_bounding_box(image, offset_y, offset_x, height, width)
+
+    return tf.cond((doc_w > 1.0) & (doc_h > 1.0) & (target > share), crop, lambda: image)
 
 
 # -- anonymisation degradations ---------------------------------------------
@@ -692,6 +744,10 @@ def load_image(
         has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
         should_crop = tf.math.logical_and(has_bbox, tf.random.uniform(()) < bbox_aug_prob)
         image = tf.cond(should_crop, lambda: crop_by_bbox(image, bbox, margin), lambda: image)
+    elif training and DOC_SCALE_PROB > 0.0:
+        has_bbox = tf.greater(tf.strings.length(tf.strings.strip(bbox)), 0)
+        should_crop = tf.math.logical_and(has_bbox, tf.random.uniform(()) < DOC_SCALE_PROB)
+        image = tf.cond(should_crop, lambda: random_document_crop(image, bbox), lambda: image)
     if rotate:
         image = tf.image.rot90(image, rotate // 90)  # counter-clockwise, like PIL ROTATE_90
     if training and ROT90_PROB > 0.0:
@@ -1556,9 +1612,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--augment",
         type=str,
-        help="Training augmentation: base (flip/affine/noise), domain (base + every group), or base plus domain "
-        "groups joined with '+': color (brightness/contrast/gamma, hue/RGB shift, shadow), degrade (blur, "
-        "noise, JPEG), geom (perspective). E.g. color, color+degrade.",
+        help="Training augmentation: base (flip/affine/noise), or base plus groups joined with '+': color "
+        "(brightness/contrast/gamma, hue/RGB shift, shadow), degrade (blur, noise, JPEG), geom (perspective), "
+        "camera (white balance, tone curve, sharpening, sensor noise, local contrast), scale (crop around the "
+        "bbox so the document spans 60-95%% of the frame; needs bboxes). domain = color+degrade+geom. "
+        "E.g. color, domain+camera+scale.",
     )
     parser.add_argument(
         "--freq-aug",
@@ -1674,7 +1732,10 @@ def main() -> None:
         augment_groups = set_augment_preset(args.augment)
     except ValueError as error:
         raise SystemExit(f"--augment: {error}") from error
-    print(f"Augmentation preset: {args.augment} (domain groups: {', '.join(augment_groups) or 'none'})")
+    print(f"Augmentation preset: {args.augment} (groups: {', '.join(augment_groups) or 'none'})")
+    if "scale" in augment_groups and (args.use_bbox_crop or args.bbox_aug_prob > 0.0):
+        raise SystemExit("--augment scale crops full frames around the document; it cannot be combined with "
+                         "--use-bbox-crop or --bbox-aug-prob")
 
     try:
         DEGRADATIONS[:] = parse_degrade(args.degrade or "")
@@ -1757,6 +1818,12 @@ def main() -> None:
         validation_bboxes = [bboxes[index] for index in validation_indices]
         validation_csv = None
 
+    if "scale" in augment_groups:
+        with_bbox = sum(1 for value in train_bboxes if value)
+        if with_bbox == 0:
+            raise SystemExit(f"--augment scale needs a bbox column in {args.csv}; no training row has one")
+        print(f"Document-scale crops: {with_bbox}/{len(train_bboxes)} training rows have a bbox "
+              f"(p={DOC_SCALE_PROB:g}, document share {DOC_SCALE_SHARE[0]:g}-{DOC_SCALE_SHARE[1]:g})")
     if args.cover_attack_datasets:
         print(describe_attack_coverage(train_labels, train_datasets, args.batch_size))
     source_of = None
@@ -1890,6 +1957,7 @@ def main() -> None:
         },
         "rot90_prob": ROT90_PROB,
         "augment_groups": list(augment_groups),
+        "doc_scale": {"prob": DOC_SCALE_PROB, "share": list(DOC_SCALE_SHARE)} if DOC_SCALE_PROB else None,
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
         "freq_aug": [
             {"kind": kind, "prob": prob, **({"eta": param} if kind == "ampmix" else {})}

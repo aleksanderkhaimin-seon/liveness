@@ -235,8 +235,12 @@ That is `--augment base` (the default). `--augment domain` adds capture-conditio
 | `color` | brightness/contrast or gamma (p 0.8), hue/saturation or RGB shift (p 0.6), shadow (p 0.2) |
 | `degrade` | Gaussian, motion or defocus blur (p 0.3), Gaussian noise (p 0.3), JPEG (p 0.4) |
 | `geom` | perspective, scale 0.02–0.08 (p 0.3) |
+| `camera` | white balance 4000–9000 K, tone curve, sharpening, sensor noise (each p 0.3), local contrast/CLAHE (p 0.1); applied before JPEG |
+| `scale` | with p 0.5, crop around the bbox, keeping the frame's aspect ratio and the whole document, so the document spans a random 60–95% of the frame; frames already above the drawn share are left alone |
 
-`domain` is the same as `color+degrade+geom`: the same transforms in the same order as before the split, so earlier `domain` runs stay comparable. `report.json` records the groups under `augment_groups`.
+`domain` is the same as `color+degrade+geom`: the same transforms in the same order as before the split, so earlier `domain` runs stay comparable. `camera` and `scale` are not part of `domain`; add them explicitly, e.g. `--augment domain+camera+scale`. `report.json` records the groups under `augment_groups`, and the `scale` settings under `doc_scale`.
+
+`scale` targets a measured gap. In production the document spans about 84% of the frame's long axis for both classes (10th–90th percentile 0.66–0.94). In training, scraped lives fill about 96% and replays only 60–72%, so the amount of background tracks the label. The crop happens before the resize, so a closer crop keeps full resolution, as a closer capture would. It needs a `bbox` column in the training CSV (rows without one are left alone), and it cannot be combined with `--use-bbox-crop` or `--bbox-aug-prob`.
 
 Validation, testing, checkpoint conversion, and ONNX inference do not include augmentations.
 

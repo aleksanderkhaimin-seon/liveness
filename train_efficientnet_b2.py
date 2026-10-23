@@ -1159,14 +1159,28 @@ def build_learning_rate(
     )
 
 
+EFFICIENTNET_VARIANTS: dict[str, type] = {
+    "b0": tf.keras.applications.EfficientNetB0,
+    "b1": tf.keras.applications.EfficientNetB1,
+    "b2": tf.keras.applications.EfficientNetB2,
+    "b3": tf.keras.applications.EfficientNetB3,
+    "b4": tf.keras.applications.EfficientNetB4,
+    "b5": tf.keras.applications.EfficientNetB5,
+    "b6": tf.keras.applications.EfficientNetB6,
+    "b7": tf.keras.applications.EfficientNetB7,
+}
+
+
 def build_model(
     learning_rate,
     train_backbone: bool,
     backbone_weights: str | None = "imagenet",
+    backbone_variant: str = "b2",
 ) -> tf.keras.Model:
     inputs = tf.keras.Input(shape=(IMAGE_SIZE, IMAGE_SIZE, 3))
 
-    backbone = tf.keras.applications.EfficientNetB2(
+    backbone_cls = EFFICIENTNET_VARIANTS[backbone_variant]
+    backbone = backbone_cls(
         include_top=False,
         weights=backbone_weights,
         input_shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
@@ -1406,6 +1420,7 @@ CONFIG_DEFAULTS = {
     "checkpoint_monitor": "val_eer",
     "image_size": 512,
     "resize_mode": "squash",
+    "backbone": "b2",
     "comment": "",
 }
 CHECKPOINT_MODES = {"val_eer": "min", "val_auc": "max", "val_loss": "min", "val_acer": "min"}
@@ -1522,6 +1537,7 @@ def parse_args() -> argparse.Namespace:
         "a random spectral ring), ampmix:P[:ETA] (mix Fourier amplitude with an image of the other class, "
         "keep phase). E.g. rescale:0.5,bandstop:0.3,ampmix:0.5",
     )
+    parser.add_argument("--backbone", choices=sorted(EFFICIENTNET_VARIANTS), help="EfficientNet variant to use (default b2).")
     parser.add_argument("--image-size", type=int, help="Network input side in px (default 512). Exported doc:96 frames are ~170-210 px.")
     parser.add_argument(
         "--resize-mode",
@@ -1780,7 +1796,7 @@ def main() -> None:
         min_learning_rate=args.min_learning_rate,
     )
 
-    model = build_model(learning_rate, args.train_backbone)
+    model = build_model(learning_rate, args.train_backbone, backbone_variant=args.backbone)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     if args.config is not None:
         shutil.copy2(args.config, args.output_dir / args.config.name)
@@ -1844,7 +1860,7 @@ def main() -> None:
             {"kind": kind, "prob": prob, **({"eta": param} if kind == "ampmix" else {})}
             for kind, (prob, param) in FREQ_AUG.items()
         ],
-        "input": {"image_size": IMAGE_SIZE, "resize_mode": RESIZE_MODE},
+        "input": {"image_size": IMAGE_SIZE, "resize_mode": RESIZE_MODE, "backbone": args.backbone},
         "throughput": {
             "train_seconds_per_epoch": [round(v, 1) for v in timing.train_seconds],
             "keras_validation_seconds_per_epoch": [round(v, 1) for v in timing.val_seconds],

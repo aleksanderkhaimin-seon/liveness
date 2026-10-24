@@ -240,6 +240,15 @@ That is `--augment base` (the default). `--augment domain` adds capture-conditio
 
 `domain` is the same as `color+degrade+geom`: the same transforms in the same order as before the split, so earlier `domain` runs stay comparable. `camera` and `scale` are not part of `domain`; add them explicitly, e.g. `--augment domain+camera+scale`. `report.json` records the groups under `augment_groups`, and the `scale` settings under `doc_scale`.
 
+`color` and `degrade` take a strength in [0, 3] after a colon: `--augment color:1.5+degrade:2+geom`, or `domain+color:2` (the other groups stay at 1). At strength s, ranges are multiplied by s, and each probability p becomes 1 − (1 − p)^s. So 1 is the preset exactly as before, 0 switches the group off, and large values apply it almost always. Shadow and JPEG scale only in how often they are applied. Mean grey-level change on a document-like frame:
+
+| strength | 0 | 0.5 | 1 | 1.5 | 2 | 3 |
+|---|---|---|---|---|---|---|
+| `color` | 0 | 13 | 26 | 45 | 55 | 72 |
+| `degrade` | 0 | 6 | 15 | 27 | 39 | 49 |
+
+`report.json` records the strengths under `augment_strength`. Note on library defaults: with albumentations 2.x, `degrade`'s JPEG (quality 99–100) is almost lossless, and its Gaussian noise is strong (std 20–44% of the range). JPEG variation in practice comes from `--freq-aug rescale`.
+
 `scale` targets a measured gap. In production the document spans about 84% of the frame's long axis for both classes (10th–90th percentile 0.66–0.94). In training, scraped lives fill about 96% and replays only 60–72%, so the amount of background tracks the label. The crop happens before the resize, so a closer crop keeps full resolution, as a closer capture would. It needs a `bbox` column in the training CSV (rows without one are left alone), and it cannot be combined with `--use-bbox-crop` or `--bbox-aug-prob`.
 
 Validation, testing, checkpoint conversion, and ONNX inference do not include augmentations.

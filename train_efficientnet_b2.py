@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import inspect
 import json
 import math
 import shutil
@@ -100,31 +101,76 @@ _BASE_AUGMENTATIONS = [
 # "domain" is color+degrade+geom. A selection keeps this list's order, so
 # "domain" is exactly the preset used before the split. A sixth group, scale, is
 # not an albumentations transform: see DOC_SCALE_PROB.
+#
+# color and degrade take a strength s (--augment color:1.5+degrade:2): ranges are
+# multiplied by s and each probability p becomes 1 - (1 - p)**s, so s=1 is the
+# preset exactly as before, s=0 switches the group's transforms off and large s
+# applies them almost always. Shadow and JPEG scale in probability only: their
+# magnitude arguments differ between albumentations 1.x and 2.x, and JPEG's
+# default (quality 99-100 in 2.x) is almost lossless anyway -- JPEG variation
+# comes from --freq-aug rescale. Each entry is a factory taking the strength.
+STRENGTH_GROUPS = ("color", "degrade")
+
+
+def _prob(p: float, strength: float) -> float:
+    return p if strength == 1.0 else 1.0 - (1.0 - p) ** strength
+
+
+def _odd(value: float) -> int:
+    n = max(3, int(round(value)))
+    return n if n % 2 else n + 1
+
+
+def _gauss_noise(strength: float) -> A.BasicTransform:
+    if strength == 1.0:
+        return A.GaussNoise(p=0.3)
+    if "std_range" in inspect.signature(A.GaussNoise).parameters:
+        # 2.x: std as a fraction of the maximum value, default (0.2, 0.44).
+        return A.GaussNoise(std_range=(min(1.0, 0.2 * strength), min(1.0, 0.44 * strength)), p=_prob(0.3, strength))
+    return A.GaussNoise(var_limit=(10.0 * strength**2, 50.0 * strength**2), p=_prob(0.3, strength))  # 1.x: variance
+
+
+def _blur(strength: float) -> A.BasicTransform:
+    if strength == 1.0:
+        return A.OneOf([A.GaussianBlur(p=1.0), A.MotionBlur(p=1.0), A.Defocus(p=1.0)], p=0.3)
+    # Scaled from the 2.x defaults: sigma (0.5, 3), motion kernel (3, 7), defocus radius (3, 10).
+    return A.OneOf(
+        [
+            A.GaussianBlur(blur_limit=0, sigma_limit=(0.5 * strength, 3.0 * strength), p=1.0),
+            A.MotionBlur(blur_limit=(3, _odd(7 * strength)), p=1.0),
+            A.Defocus(radius=(max(1, round(3 * strength)), max(1, round(10 * strength))), p=1.0),
+        ],
+        p=_prob(0.3, strength),
+    )
+
+
 _GROUP_AUGMENTATIONS = [
-    ("color", A.OneOf(
+    ("color", lambda s: A.OneOf(
         [
-            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=1.0),
-            A.RandomGamma(gamma_limit=(70, 140), p=1.0),
+            A.RandomBrightnessContrast(brightness_limit=min(0.9, 0.3 * s), contrast_limit=min(0.9, 0.3 * s), p=1.0),
+            A.RandomGamma(gamma_limit=(round(100 * 0.7**s), round(100 * 1.4**s)), p=1.0),
         ],
-        p=0.8,
+        p=_prob(0.8, s),
     )),
-    ("color", A.OneOf(
+    ("color", lambda s: A.OneOf(
         [
-            A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=30, val_shift_limit=20, p=1.0),
-            A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=1.0),
+            A.HueSaturationValue(hue_shift_limit=min(90, round(10 * s)), sat_shift_limit=min(100, round(30 * s)),
+                                 val_shift_limit=min(100, round(20 * s)), p=1.0),
+            A.RGBShift(r_shift_limit=min(100, round(20 * s)), g_shift_limit=min(100, round(20 * s)),
+                       b_shift_limit=min(100, round(20 * s)), p=1.0),
         ],
-        p=0.6,
+        p=_prob(0.6, s),
     )),
-    ("degrade", A.OneOf([A.GaussianBlur(p=1.0), A.MotionBlur(p=1.0), A.Defocus(p=1.0)], p=0.3)),
-    ("degrade", A.GaussNoise(p=0.3)),
-    ("camera", A.PlanckianJitter(mode="blackbody", temperature_limit=(4000, 9000), p=0.3)),
-    ("camera", A.RandomToneCurve(scale=0.1, p=0.3)),
-    ("camera", A.Sharpen(alpha=(0.1, 0.3), lightness=(0.9, 1.1), p=0.3)),
-    ("camera", A.ISONoise(p=0.3)),
-    ("camera", A.CLAHE(clip_limit=(1, 2), p=0.1)),
-    ("degrade", A.ImageCompression(p=0.4)),
-    ("geom", A.Perspective(scale=(0.02, 0.08), p=0.3)),
-    ("color", A.RandomShadow(p=0.2)),
+    ("degrade", _blur),
+    ("degrade", _gauss_noise),
+    ("camera", lambda s: A.PlanckianJitter(mode="blackbody", temperature_limit=(4000, 9000), p=0.3)),
+    ("camera", lambda s: A.RandomToneCurve(scale=0.1, p=0.3)),
+    ("camera", lambda s: A.Sharpen(alpha=(0.1, 0.3), lightness=(0.9, 1.1), p=0.3)),
+    ("camera", lambda s: A.ISONoise(p=0.3)),
+    ("camera", lambda s: A.CLAHE(clip_limit=(1, 2), p=0.1)),
+    ("degrade", lambda s: A.ImageCompression(p=_prob(0.4, s))),
+    ("geom", lambda s: A.Perspective(scale=(0.02, 0.08), p=0.3)),
+    ("color", lambda s: A.RandomShadow(p=_prob(0.2, s))),
 ]
 DOMAIN_GROUPS = ("color", "degrade", "geom")
 AUGMENT_GROUPS = (*DOMAIN_GROUPS, "camera", "scale")
@@ -140,34 +186,58 @@ DOC_SCALE_PROB = 0.0
 DOC_SCALE_SHARE = (0.6, 0.95)
 
 
-def parse_augment(spec: str) -> tuple[str, ...]:
-    """Groups selected by an --augment spec, in AUGMENT_GROUPS order.
+def parse_augment(spec: str) -> tuple[tuple[str, ...], dict[str, float]]:
+    """Groups selected by an --augment spec, in AUGMENT_GROUPS order, and the strength of each
+    selected color/degrade group.
 
-    `base` = flip/affine/multiplicative noise only; `domain` = color+degrade+geom;
-    groups are joined with '+', e.g. `color`, `color+degrade`, `domain+camera+scale`.
+    `base` = flip/affine/multiplicative noise only; `domain` = color+degrade+geom; groups are
+    joined with '+', e.g. `color`, `domain+camera+scale`. color and degrade take an optional
+    strength in [0, 3] after a colon: `color:1.5+degrade:2`, `domain+color:2` (default 1).
     """
-    tokens = [token.strip().lower() for token in spec.split("+") if token.strip()]
     allowed = ("base", "domain", *AUGMENT_GROUPS)
-    unknown = [token for token in tokens if token not in allowed]
-    if not tokens or unknown:
-        raise ValueError(f"augment must be base, domain or groups from {AUGMENT_GROUPS} joined with '+', got {spec!r}")
-    selected = set(tokens) | (set(DOMAIN_GROUPS) if "domain" in tokens else set())
-    return tuple(group for group in AUGMENT_GROUPS if group in selected)
+    usage = (f"augment must be base, domain or groups from {AUGMENT_GROUPS} joined with '+' "
+             f"(strength after a colon for {STRENGTH_GROUPS}, e.g. color:1.5), got {spec!r}")
+    selected: set[str] = set()
+    strengths: dict[str, float] = {}
+    for token in (token.strip().lower() for token in spec.split("+")):
+        if not token:
+            continue
+        name, colon, value = (part.strip() for part in token.partition(":"))
+        if name not in allowed or (colon and name not in STRENGTH_GROUPS):
+            raise ValueError(usage)
+        if colon:
+            try:
+                strength = float(value)
+            except ValueError as error:
+                raise ValueError(usage) from error
+            if not 0.0 <= strength <= 3.0:
+                raise ValueError(f"{name} strength must be in [0, 3], got {strength:g}")
+            if strengths.get(name, strength) != strength:
+                raise ValueError(f"{name} is given two strengths in {spec!r}")
+            strengths[name] = strength
+        selected |= set(DOMAIN_GROUPS) if name == "domain" else {name}
+    if not selected and "base" not in spec.lower():
+        raise ValueError(usage)
+    groups = tuple(group for group in AUGMENT_GROUPS if group in selected)
+    return groups, {group: strengths.get(group, 1.0) for group in STRENGTH_GROUPS if group in groups}
 
 
-def augment_transforms(groups: tuple[str, ...]) -> list:
-    return _BASE_AUGMENTATIONS + [transform for group, transform in _GROUP_AUGMENTATIONS if group in groups]
+def augment_transforms(groups: tuple[str, ...], strengths: dict[str, float] | None = None) -> list:
+    strengths = strengths or {}
+    return _BASE_AUGMENTATIONS + [
+        factory(strengths.get(group, 1.0)) for group, factory in _GROUP_AUGMENTATIONS if group in groups
+    ]
 
 
 AUGMENTER = A.Compose(augment_transforms(()))
 
 
-def set_augment_preset(spec: str) -> tuple[str, ...]:
+def set_augment_preset(spec: str) -> tuple[tuple[str, ...], dict[str, float]]:
     global AUGMENTER, DOC_SCALE_PROB
-    groups = parse_augment(spec)
-    AUGMENTER = A.Compose(augment_transforms(groups))
+    groups, strengths = parse_augment(spec)
+    AUGMENTER = A.Compose(augment_transforms(groups, strengths))
     DOC_SCALE_PROB = 0.5 if "scale" in groups else 0.0
-    return groups
+    return groups, strengths
 
 
 def configure_runtime(require_gpu: bool, mixed_precision: bool) -> None:
@@ -1616,7 +1686,8 @@ def parse_args() -> argparse.Namespace:
         "(brightness/contrast/gamma, hue/RGB shift, shadow), degrade (blur, noise, JPEG), geom (perspective), "
         "camera (white balance, tone curve, sharpening, sensor noise, local contrast), scale (crop around the "
         "bbox so the document spans 60-95%% of the frame; needs bboxes). domain = color+degrade+geom. "
-        "E.g. color, domain+camera+scale.",
+        "color and degrade take a strength in [0, 3] after a colon (ranges x s, probabilities 1-(1-p)^s; "
+        "default 1). E.g. color, domain+camera+scale, color:1.5+degrade:2+geom.",
     )
     parser.add_argument(
         "--freq-aug",
@@ -1729,10 +1800,11 @@ def main() -> None:
         raise SystemExit(str(error)) from error
     print(f"Input geometry: {IMAGE_SIZE}x{IMAGE_SIZE}, {RESIZE_MODE}")
     try:
-        augment_groups = set_augment_preset(args.augment)
+        augment_groups, augment_strengths = set_augment_preset(args.augment)
     except ValueError as error:
         raise SystemExit(f"--augment: {error}") from error
-    print(f"Augmentation preset: {args.augment} (groups: {', '.join(augment_groups) or 'none'})")
+    print(f"Augmentation preset: {args.augment} (groups: {', '.join(augment_groups) or 'none'}"
+          + "".join(f"; {group} strength {value:g}" for group, value in augment_strengths.items() if value != 1.0) + ")")
     if "scale" in augment_groups and (args.use_bbox_crop or args.bbox_aug_prob > 0.0):
         raise SystemExit("--augment scale crops full frames around the document; it cannot be combined with "
                          "--use-bbox-crop or --bbox-aug-prob")
@@ -1957,6 +2029,7 @@ def main() -> None:
         },
         "rot90_prob": ROT90_PROB,
         "augment_groups": list(augment_groups),
+        "augment_strength": augment_strengths,
         "doc_scale": {"prob": DOC_SCALE_PROB, "share": list(DOC_SCALE_SHARE)} if DOC_SCALE_PROB else None,
         "degrade": [{"kind": kind, "value": value} for kind, value in DEGRADATIONS],
         "freq_aug": [

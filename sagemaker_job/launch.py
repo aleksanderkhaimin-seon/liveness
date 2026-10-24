@@ -81,12 +81,30 @@ def instance_has_gpu(instance_type: str) -> bool:
 
 # Mirrors train_efficientnet_b2.parse_augment, checked here so a typo fails before the job is submitted.
 AUGMENT_TOKENS = ("base", "domain", "color", "degrade", "geom", "camera", "scale")
+AUGMENT_STRENGTH_TOKENS = ("color", "degrade")
 
 
 def augment_spec(text: str) -> str:
-    tokens = [token.strip().lower() for token in text.split("+") if token.strip()]
-    if not tokens or any(token not in AUGMENT_TOKENS for token in tokens):
-        raise argparse.ArgumentTypeError(f"expected base, domain or groups from color, degrade, geom, camera, scale joined with '+', got {text!r}")
+    usage = ("expected base, domain or groups from color, degrade, geom, camera, scale joined with '+' "
+             f"(color/degrade may take a strength in [0, 3], e.g. color:1.5), got {text!r}")
+    tokens = []
+    for token in (token.strip().lower() for token in text.split("+")):
+        if not token:
+            continue
+        name, colon, value = (part.strip() for part in token.partition(":"))
+        if name not in AUGMENT_TOKENS or (colon and name not in AUGMENT_STRENGTH_TOKENS):
+            raise argparse.ArgumentTypeError(usage)
+        if colon:
+            try:
+                strength = float(value)
+            except ValueError:
+                raise argparse.ArgumentTypeError(usage) from None
+            if not 0.0 <= strength <= 3.0:
+                raise argparse.ArgumentTypeError(f"{name} strength must be in [0, 3], got {strength:g}")
+            token = f"{name}:{strength:g}"
+        tokens.append(token)
+    if not tokens:
+        raise argparse.ArgumentTypeError(usage)
     return "+".join(tokens)
 
 
@@ -446,7 +464,8 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
     )
     parser.add_argument("--augment", default=None, type=augment_spec,
                         help="Training augmentation (training default: base): base, domain (= color+degrade+geom), "
-                        "or groups joined with '+' from color, degrade, geom, camera, scale, e.g. domain+camera+scale.")
+                        "or groups joined with '+' from color, degrade, geom, camera, scale; color/degrade take a "
+                        "strength after a colon, e.g. domain+camera+scale, color:1.5+degrade:2+geom.")
     parser.add_argument("--freq-aug", default=None,
                         help="Training-only frequency augmentations, e.g. rescale:0.5,bandstop:0.3,ampmix:0.5. "
                         "Overrides the config's freq_aug key.")
